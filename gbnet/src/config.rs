@@ -5,8 +5,6 @@
 //! delivery modes.
 use std::time::Duration;
 
-// ─── Default constants for NetworkConfig ────────────────────────────────────
-
 pub const DEFAULT_PROTOCOL_ID: u32 = 0x12345678;
 pub const DEFAULT_MAX_CLIENTS: usize = 64;
 pub const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 10;
@@ -46,8 +44,6 @@ pub const DEFAULT_CHANNEL_PRIORITY: u8 = 128;
 /// Maximum exponential backoff exponent for retransmission (caps at 2^5 = 32x RTO).
 pub const MAX_BACKOFF_EXPONENT: u32 = 5;
 
-// ─── Validation limits ──────────────────────────────────────────────────────
-
 pub const MIN_MTU: usize = 576;
 pub const MAX_MTU: usize = 65535;
 pub const MAX_CHANNEL_COUNT: usize = 256;
@@ -68,6 +64,7 @@ pub enum DeliveryMode {
 }
 
 impl DeliveryMode {
+    /// Returns `true` if this mode provides guaranteed delivery.
     pub fn is_reliable(&self) -> bool {
         matches!(
             self,
@@ -77,6 +74,7 @@ impl DeliveryMode {
         )
     }
 
+    /// Returns `true` if this mode drops stale (out-of-sequence) messages.
     pub fn is_sequenced(&self) -> bool {
         matches!(
             self,
@@ -84,6 +82,7 @@ impl DeliveryMode {
         )
     }
 
+    /// Returns `true` if this mode buffers and delivers messages in send order.
     pub fn is_ordered(&self) -> bool {
         matches!(self, DeliveryMode::ReliableOrdered)
     }
@@ -158,24 +157,20 @@ impl std::error::Error for ConfigError {}
 /// Top-level network configuration for both client and server.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
-    // Protocol
     pub protocol_id: u32,
     pub max_clients: usize,
 
-    // Timing
     pub connection_timeout: Duration,
     pub keepalive_interval: Duration,
     pub connection_request_timeout: Duration,
     pub connection_request_max_retries: u32,
 
-    // Packet settings
     pub mtu: usize,
     pub fragment_threshold: usize,
     pub fragment_timeout: Duration,
     pub max_fragments: usize,
     pub max_reassembly_buffer_size: usize,
 
-    // Reliability
     pub packet_buffer_size: usize,
     pub ack_buffer_size: usize,
     pub max_sequence_distance: u16,
@@ -183,40 +178,29 @@ pub struct NetworkConfig {
     pub max_reliable_retries: u32,
     pub max_in_flight: usize,
 
-    // Channels
     pub max_channels: usize,
     pub default_channel_config: ChannelConfig,
     pub channel_configs: Vec<ChannelConfig>,
 
-    // Rate limiting
     pub send_rate: f32,
     pub max_packet_rate: f32,
     pub congestion_threshold: f32,
 
-    // Security
     pub encryption: bool,
     pub encryption_key: Option<[u8; 32]>,
     pub max_tracked_tokens: usize,
 
-    // Congestion
     pub congestion_good_rtt_threshold: f32,
     pub congestion_bad_loss_threshold: f32,
     pub congestion_recovery_time: Duration,
 
-    // Simulation (only active with "simulation" feature)
     pub simulation: Option<SimulationConfig>,
 
-    // Disconnect
     pub disconnect_retries: u32,
     pub disconnect_retry_timeout: Duration,
 
-    // Bandwidth
     pub max_bandwidth_bytes_per_sec: usize,
-
-    // Pending connections cap
     pub max_pending: usize,
-
-    // Rate limiting (connection requests per second per IP)
     pub rate_limit_per_second: usize,
 }
 
@@ -416,6 +400,7 @@ impl Default for ChannelConfig {
 }
 
 impl ChannelConfig {
+    /// Preset: fire-and-forget, no guarantees.
     pub fn unreliable() -> Self {
         Self {
             delivery_mode: DeliveryMode::Unreliable,
@@ -423,6 +408,7 @@ impl ChannelConfig {
         }
     }
 
+    /// Preset: unreliable with stale-packet dropping.
     pub fn unreliable_sequenced() -> Self {
         Self {
             delivery_mode: DeliveryMode::UnreliableSequenced,
@@ -430,6 +416,7 @@ impl ChannelConfig {
         }
     }
 
+    /// Preset: guaranteed delivery, no ordering.
     pub fn reliable_unordered() -> Self {
         Self {
             delivery_mode: DeliveryMode::ReliableUnordered,
@@ -437,6 +424,7 @@ impl ChannelConfig {
         }
     }
 
+    /// Preset: guaranteed delivery in send order.
     pub fn reliable_ordered() -> Self {
         Self {
             delivery_mode: DeliveryMode::ReliableOrdered,
@@ -444,6 +432,7 @@ impl ChannelConfig {
         }
     }
 
+    /// Preset: guaranteed delivery, only latest message delivered.
     pub fn reliable_sequenced() -> Self {
         Self {
             delivery_mode: DeliveryMode::ReliableSequenced,
@@ -451,6 +440,7 @@ impl ChannelConfig {
         }
     }
 
+    /// Sets the channel priority (lower value = higher priority).
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self

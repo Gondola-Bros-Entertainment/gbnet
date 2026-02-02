@@ -1,11 +1,10 @@
-// reliability.rs - Reliable packet delivery with Jacobson/Karels RTT estimation
+//! Reliable packet delivery with Jacobson/Karels RTT estimation, adaptive RTO,
+//! fast retransmit, and bounded in-flight tracking.
 use crate::stats::ReliabilityStats;
 use crate::util::{sequence_diff, sequence_greater_than};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-
-// ─── Constants ──────────────────────────────────────────────────────────────
 
 pub const INITIAL_RTO_MILLIS: u64 = 100;
 pub const ACK_BITS_WINDOW: u16 = 32;
@@ -31,21 +30,17 @@ pub struct ReliableEndpoint {
     max_retries: u32,
     max_in_flight: usize,
 
-    // Jacobson/Karels RTT estimation
     srtt: f64,
     rttvar: f64,
     rto: Duration,
     has_rtt_sample: bool,
 
-    // Packet loss tracking (rolling window of last 256 sequences)
     loss_window: [bool; 256],
     loss_window_index: usize,
     loss_window_count: usize,
 
-    // Fast retransmit
     dup_ack_counts: HashMap<u16, u32>,
 
-    // Stats
     total_packets_sent: u64,
     total_packets_acked: u64,
     total_packets_lost: u64,
@@ -106,7 +101,6 @@ impl ReliableEndpoint {
     pub fn on_packet_sent(&mut self, sequence: u16, send_time: Instant, data: Vec<u8>) {
         let size = data.len();
 
-        // Evict if at capacity
         if self.sent_packets.len() >= self.max_in_flight {
             self.evict_worst_in_flight();
         }
@@ -187,7 +181,7 @@ impl ReliableEndpoint {
         if let Some(packet_data) = self.sent_packets.remove(&sequence) {
             let rtt_sample = packet_data.send_time.elapsed().as_secs_f64() * 1000.0;
 
-            // Only use RTT from non-retransmitted packets (Karn's algorithm)
+            // Karn's algorithm: skip RTT samples from retransmitted packets
             if packet_data.retry_count == 0 {
                 self.update_rtt(rtt_sample);
             }
@@ -195,7 +189,6 @@ impl ReliableEndpoint {
             self.total_packets_acked += 1;
             self.bytes_acked += packet_data.size as u64;
 
-            // Record successful delivery in loss window
             self.record_loss_sample(false);
         }
 
@@ -231,7 +224,6 @@ impl ReliableEndpoint {
 
         for (&sequence, packet_data) in &mut self.sent_packets {
             let elapsed = current_time.duration_since(packet_data.send_time);
-            // Progressive backoff: RTO doubles each retry (ENet-style)
             let backoff_rto =
                 self.rto * (1u32 << packet_data.retry_count.min(MAX_BACKOFF_EXPONENT));
             if elapsed >= backoff_rto {

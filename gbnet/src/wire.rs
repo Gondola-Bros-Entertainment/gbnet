@@ -1,4 +1,4 @@
-// wire.rs - Shared packet sending utilities
+//! Shared packet sending utilities used by both [`crate::server::NetServer`] and [`crate::client::NetClient`].
 use std::net::SocketAddr;
 
 use crate::packet::{Packet, PacketHeader, PacketType};

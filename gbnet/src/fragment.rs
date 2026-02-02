@@ -1,4 +1,4 @@
-// fragment.rs - Message fragmentation and reassembly
+//! Message fragmentation, reassembly, and path MTU discovery.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -8,6 +8,7 @@ pub const MIN_MTU: usize = 576;
 pub const MAX_MTU: usize = 1500;
 pub const MTU_CONVERGENCE_THRESHOLD: usize = 1;
 
+/// Errors from the fragmentation subsystem.
 #[derive(Debug)]
 pub enum FragmentError {
     TooManyFragments,
@@ -178,21 +179,18 @@ impl FragmentAssembler {
 
     /// Process a fragment. Returns the reassembled message if all fragments arrived.
     pub fn process_fragment(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        // Cleanup expired entries first to ensure accurate budget
         self.cleanup();
 
         let header = FragmentHeader::deserialize(data)?;
         let fragment_data = data[FRAGMENT_HEADER_SIZE..].to_vec();
         let fragment_size = fragment_data.len();
 
-        // Validate fragment_count consistency before creating entry
         if let Some(existing) = self.buffers.get(&header.message_id) {
             if existing.fragment_count != header.fragment_count {
                 return None;
             }
         }
 
-        // Check memory limit
         if self.current_buffer_size + fragment_size > self.max_buffer_size {
             self.expire_oldest();
         }
@@ -205,7 +203,6 @@ impl FragmentAssembler {
         self.current_buffer_size += fragment_size;
 
         if buffer.insert(header.fragment_index, fragment_data) {
-            // Complete! Assemble and remove.
             let result = buffer.assemble();
             if let Some(buf) = self.buffers.remove(&header.message_id) {
                 self.current_buffer_size = self.current_buffer_size.saturating_sub(buf.total_size);
@@ -302,7 +299,6 @@ impl MtuDiscovery {
             return None;
         }
 
-        // Check timeout
         if let Some(last) = self.last_probe_time {
             if last.elapsed() < self.probe_timeout {
                 return None;

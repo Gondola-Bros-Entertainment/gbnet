@@ -1,4 +1,4 @@
-// stats.rs - Consolidated statistics types
+//! Consolidated statistics types for connections, channels, reliability, and sockets.
 use std::time::Instant;
 
 /// Connection quality indicator.
@@ -19,6 +19,7 @@ pub const FAIR_RTT_THRESHOLD_MS: f32 = 250.0;
 /// Packet loss threshold (ratio, 0.0–1.0) below which quality is considered Fair (above Good).
 pub const FAIR_LOSS_THRESHOLD: f32 = 0.1;
 
+/// Assesses connection quality based on RTT and packet loss thresholds.
 pub fn assess_connection_quality(rtt_ms: f32, loss_percent: f32) -> ConnectionQuality {
     if rtt_ms < GOOD_RTT_THRESHOLD_MS && loss_percent < GOOD_LOSS_THRESHOLD {
         ConnectionQuality::Good
@@ -29,6 +30,7 @@ pub fn assess_connection_quality(rtt_ms: f32, loss_percent: f32) -> ConnectionQu
     }
 }
 
+/// Aggregate network statistics for a single connection.
 #[derive(Debug, Clone)]
 pub struct NetworkStats {
     pub packets_sent: u64,
@@ -60,6 +62,7 @@ impl Default for NetworkStats {
     }
 }
 
+/// Per-channel message and buffer statistics.
 #[derive(Debug, Clone)]
 pub struct ChannelStats {
     pub id: u8,
@@ -73,6 +76,7 @@ pub struct ChannelStats {
     pub gap_sequences_skipped: u64,
 }
 
+/// Reliability subsystem statistics: in-flight packets, RTT, loss, and evictions.
 #[derive(Debug, Clone)]
 pub struct ReliabilityStats {
     pub packets_in_flight: usize,
@@ -88,6 +92,7 @@ pub struct ReliabilityStats {
     pub packets_evicted: u64,
 }
 
+/// Low-level socket I/O counters.
 #[derive(Debug, Default)]
 pub struct SocketStats {
     pub packets_sent: u64,

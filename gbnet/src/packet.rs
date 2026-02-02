@@ -1,4 +1,4 @@
-// packet.rs - Core packet structures for reliable UDP
+//! Core packet structures and wire format for reliable UDP transport.
 use crate::serialize::{
     bit_io::{BitBuffer, BitRead, BitWrite},
     BitDeserialize, BitSerialize,
@@ -6,9 +6,9 @@ use crate::serialize::{
 use gbnet_macros::NetworkSerialize;
 use std::io;
 
-// Re-export sequence utilities from util
 pub use crate::util::{sequence_diff, sequence_greater_than};
 
+/// Fixed-size header present on every packet: protocol ID, sequence, ack, and ack bitfield.
 #[derive(Debug, Clone, PartialEq, NetworkSerialize)]
 pub struct PacketHeader {
     #[bits = 32]
@@ -21,6 +21,7 @@ pub struct PacketHeader {
     pub ack_bits: u32,
 }
 
+/// Discriminated packet type encoded in 4 bits (up to 16 variants).
 #[derive(Debug, Clone, PartialEq, NetworkSerialize)]
 #[bits = 4] // 16 packet types max
 pub enum PacketType {
@@ -63,6 +64,7 @@ pub enum PacketType {
     },
 }
 
+/// A complete packet: header, type discriminant, and optional payload bytes.
 #[derive(Debug, Clone)]
 pub struct Packet {
     pub header: PacketHeader,
@@ -71,6 +73,7 @@ pub struct Packet {
 }
 
 impl Packet {
+    /// Creates a packet with no payload.
     pub fn new(header: PacketHeader, packet_type: PacketType) -> Self {
         Self {
             header,
@@ -79,6 +82,7 @@ impl Packet {
         }
     }
 
+    /// Attaches a payload to this packet (builder pattern).
     pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
         self.payload = payload;
         self
@@ -91,7 +95,6 @@ impl Packet {
         self.header.bit_serialize(&mut buffer)?;
         self.packet_type.bit_serialize(&mut buffer)?;
 
-        // Pad to byte boundary
         let padding = (8 - BitWrite::bit_pos(&buffer) % 8) % 8;
         if padding > 0 {
             buffer.write_bits(0, padding)?;
@@ -134,7 +137,7 @@ impl Packet {
     }
 }
 
-// Disconnect reasons
+/// Well-known disconnect reason codes sent in [`PacketType::Disconnect`].
 pub mod disconnect_reason {
     pub const TIMEOUT: u8 = 0;
     pub const REQUESTED: u8 = 1;
@@ -143,7 +146,7 @@ pub mod disconnect_reason {
     pub const PROTOCOL_MISMATCH: u8 = 4;
 }
 
-// Connection deny reasons
+/// Well-known connection-deny reason codes sent in [`PacketType::ConnectionDeny`].
 pub mod deny_reason {
     pub const SERVER_FULL: u8 = 0;
     pub const ALREADY_CONNECTED: u8 = 1;

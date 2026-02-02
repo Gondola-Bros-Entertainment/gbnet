@@ -9,6 +9,7 @@ use crate::util::sequence_greater_than;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+/// Errors from channel send operations.
 #[derive(Debug)]
 pub enum ChannelError {
     BufferFull,
@@ -32,6 +33,7 @@ impl std::error::Error for ChannelError {}
 const SEQUENCE_BYTES: usize = 2;
 use crate::config::MAX_BACKOFF_EXPONENT;
 
+/// A message queued for sending on a channel, with reliability metadata.
 #[derive(Debug, Clone)]
 pub struct ChannelMessage {
     pub sequence: u16,
@@ -42,23 +44,21 @@ pub struct ChannelMessage {
     pub reliable: bool,
 }
 
+/// A message channel providing one of 5 delivery modes with independent buffering.
 #[derive(Debug)]
 pub struct Channel {
     id: u8,
     config: ChannelConfig,
 
-    // Send state
     send_sequence: u16,
     send_buffer: VecDeque<ChannelMessage>,
     pending_ack: HashMap<u16, ChannelMessage>,
 
-    // Receive state
     receive_sequence: u16,
     last_received_sequence: u16,
     ordered_receive_buffer: HashMap<u16, (Vec<u8>, Instant)>,
     delivery_queue: VecDeque<Vec<u8>>,
 
-    // Stats
     messages_sent: u64,
     messages_received: u64,
     bytes_sent: u64,
@@ -127,7 +127,6 @@ impl Channel {
     pub fn get_outgoing_message(&mut self) -> Option<(u16, Vec<u8>)> {
         if let Some(message) = self.send_buffer.pop_front() {
             let seq = message.sequence;
-            // Prepend 16-bit sequence to wire data
             let mut wire_data = Vec::with_capacity(SEQUENCE_BYTES + message.data.len());
             wire_data.extend_from_slice(&seq.to_be_bytes());
             wire_data.extend_from_slice(&message.data);
@@ -160,7 +159,6 @@ impl Channel {
         let mut expired = Vec::new();
         for (seq, msg) in &mut self.pending_ack {
             if let Some(send_time) = msg.send_time {
-                // Progressive backoff: RTO doubles each retry
                 let backoff_rto = rto * (1u32 << msg.retry_count.min(MAX_BACKOFF_EXPONENT));
                 if now.duration_since(send_time) >= backoff_rto {
                     if msg.retry_count >= max_retries {
@@ -187,7 +185,6 @@ impl Channel {
     /// Wire format: [u16 sequence BE][payload]
     pub fn on_packet_received(&mut self, wire_data: Vec<u8>) {
         if wire_data.len() < SEQUENCE_BYTES {
-            // No sequence header - legacy path, treat as raw data
             self.delivery_queue.push_back(wire_data);
             self.messages_received += 1;
             return;
@@ -200,12 +197,10 @@ impl Channel {
 
         match self.config.delivery_mode {
             DeliveryMode::Unreliable => {
-                // Fire and forget - deliver immediately
                 self.delivery_queue.push_back(data);
                 self.messages_received += 1;
             }
             DeliveryMode::UnreliableSequenced => {
-                // Only deliver if newer than last received
                 if sequence_greater_than(seq, self.last_received_sequence)
                     || self.messages_received == 0
                 {
@@ -213,22 +208,17 @@ impl Channel {
                     self.delivery_queue.push_back(data);
                     self.messages_received += 1;
                 }
-                // else: stale packet, drop silently
             }
             DeliveryMode::ReliableUnordered => {
-                // Deliver immediately on arrival (no ordering)
                 self.delivery_queue.push_back(data);
                 self.messages_received += 1;
             }
             DeliveryMode::ReliableOrdered => {
-                // Buffer out-of-order, deliver in sequence
                 if seq == self.receive_sequence {
-                    // This is the next expected message
                     self.delivery_queue.push_back(data);
                     self.messages_received += 1;
                     self.receive_sequence = self.receive_sequence.wrapping_add(1);
 
-                    // Flush any buffered messages that are now in order
                     while let Some((buffered, _)) =
                         self.ordered_receive_buffer.remove(&self.receive_sequence)
                     {
@@ -237,18 +227,14 @@ impl Channel {
                         self.receive_sequence = self.receive_sequence.wrapping_add(1);
                     }
                 } else if sequence_greater_than(seq, self.receive_sequence) {
-                    // Out of order - buffer it (enforce max size)
                     if self.ordered_receive_buffer.len() >= self.config.max_ordered_buffer_size {
-                        // Buffer full — evict the oldest entry to make room
                         self.evict_oldest_buffered();
                     }
                     self.ordered_receive_buffer
                         .insert(seq, (data, Instant::now()));
                 }
-                // else: duplicate or old, drop
             }
             DeliveryMode::ReliableSequenced => {
-                // Deliver only latest, drop stale
                 if sequence_greater_than(seq, self.last_received_sequence)
                     || self.messages_received == 0
                 {
@@ -256,7 +242,6 @@ impl Channel {
                     self.delivery_queue.push_back(data);
                     self.messages_received += 1;
                 }
-                // Stale messages are still ACKed (handled by reliability layer) but not delivered
             }
         }
     }

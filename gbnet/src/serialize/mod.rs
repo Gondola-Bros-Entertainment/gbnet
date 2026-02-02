@@ -14,18 +14,21 @@ pub mod bit_io {
     use log::{debug, trace};
     use std::io;
 
+    /// Trait for writing individual bits and bit-packed values.
     pub trait BitWrite {
         fn write_bit(&mut self, bit: bool) -> io::Result<()>;
         fn write_bits(&mut self, value: u64, bits: usize) -> io::Result<()>;
         fn bit_pos(&self) -> usize;
     }
 
+    /// Trait for reading individual bits and bit-packed values.
     pub trait BitRead {
         fn read_bit(&mut self) -> io::Result<bool>;
         fn read_bits(&mut self, bits: usize) -> io::Result<u64>;
         fn bit_pos(&self) -> usize;
     }
 
+    /// Bit-level read/write buffer for sub-byte serialization, with optional measure-only mode.
     pub struct BitBuffer {
         buffer: Vec<u8>,
         bit_pos: usize,
@@ -357,7 +360,6 @@ pub mod bit_io {
     }
 }
 
-// Serialization Traits
 pub trait BitSerialize {
     fn bit_serialize<W: bit_io::BitWrite>(&self, writer: &mut W) -> std::io::Result<()>;
 }

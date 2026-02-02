@@ -1,12 +1,14 @@
-// socket.rs - Platform-agnostic UDP socket wrapper
+//! Platform-agnostic non-blocking UDP socket wrapper with statistics tracking.
 use std::io::{Error as IoError, ErrorKind};
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use std::time::{Duration, Instant};
 
 use crate::stats::SocketStats;
 
+/// Maximum size of a single UDP datagram.
 const MAX_UDP_PACKET_SIZE: usize = 65536;
 
+/// Errors that can occur during socket operations.
 #[derive(Debug)]
 pub enum SocketError {
     Io(IoError),
@@ -46,6 +48,7 @@ impl From<IoError> for SocketError {
     }
 }
 
+/// Non-blocking UDP socket with per-socket statistics.
 pub struct UdpSocket {
     socket: StdUdpSocket,
     recv_buffer: Vec<u8>,

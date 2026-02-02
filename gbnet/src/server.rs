@@ -69,7 +69,6 @@ impl NetServer {
     pub fn update(&mut self) -> Vec<ServerEvent> {
         let mut events = Vec::new();
 
-        // Collect incoming packets into a buffer first
         let mut incoming: Vec<(SocketAddr, Packet)> = Vec::new();
         loop {
             match self.socket.recv_from() {
@@ -85,7 +84,6 @@ impl NetServer {
                     if packet.header.protocol_id != self.config.protocol_id {
                         continue;
                     }
-                    // Track received bytes for connected clients
                     if let Some(conn) = self.connections.get_mut(&addr) {
                         conn.record_bytes_received(validated.len());
                     }
@@ -96,24 +94,20 @@ impl NetServer {
             }
         }
 
-        // Process incoming packets
         for (addr, packet) in incoming {
             self.handle_server_packet(addr, packet, &mut events);
         }
 
-        // Update all connections via update_tick (reliability, retransmission, congestion, keepalive)
         let mut disconnected = Vec::new();
         let addrs: Vec<SocketAddr> = self.connections.keys().copied().collect();
         for addr in addrs {
             let conn = self.connections.get_mut(&addr).unwrap();
 
-            // Run the connection tick (handles retransmission, keepalive, congestion, etc.)
             if let Err(_e) = conn.update_tick() {
                 disconnected.push((addr, DisconnectReason::Timeout));
                 continue;
             }
 
-            // Drain the send queue and send packets over the wire
             let packets = conn.drain_send_queue();
             for packet in packets {
                 if let Ok(data) = packet.serialize() {
@@ -131,7 +125,6 @@ impl NetServer {
                 }
             }
 
-            // Drain received messages
             let conn = self.connections.get_mut(&addr).unwrap();
             let max_channels = conn.channel_count();
             for ch in 0..max_channels as u8 {
@@ -150,7 +143,6 @@ impl NetServer {
             events.push(ServerEvent::ClientDisconnected(addr, reason));
         }
 
-        // Update disconnecting connections (flush remaining disconnect packets)
         let mut finished_disconnecting = Vec::new();
         for (addr, conn) in &mut self.disconnecting {
             let _ = conn.update(&mut self.socket);
@@ -162,7 +154,6 @@ impl NetServer {
             self.disconnecting.remove(&addr);
         }
 
-        // Cleanup
         let timeout = self.config.connection_request_timeout;
         self.pending.retain(|_, p| p.created_at.elapsed() < timeout);
         self.rate_limiter.cleanup();
@@ -250,13 +241,11 @@ impl NetServer {
                     return;
                 }
 
-                // Dedup: if already fully connected, resend accept
                 if self.connections.contains_key(&addr) {
                     self.send_raw(addr, PacketType::ConnectionAccept);
                     return;
                 }
 
-                // Dedup: if already pending, resend the same challenge
                 if let Some(pending) = self.pending.get(&addr) {
                     self.send_raw(
                         addr,
@@ -291,14 +280,12 @@ impl NetServer {
                 );
             }
             PacketType::ConnectionResponse { client_salt } => {
-                // Dedup: if already connected, resend accept
                 if self.connections.contains_key(&addr) {
                     self.send_raw(addr, PacketType::ConnectionAccept);
                     return;
                 }
 
                 if let Some(pending) = self.pending.remove(&addr) {
-                    // Validate: client must not echo server_salt or send zero
                     if client_salt == 0 || client_salt == pending.server_salt {
                         self.send_raw(
                             addr,
@@ -342,7 +329,6 @@ impl NetServer {
                         return;
                     }
                     conn.touch_recv_time();
-                    // Process reliability/ACK info from header
                     conn.process_incoming_header(&packet.header);
                     if is_fragment {
                         if let Some(assembled) =
@@ -358,7 +344,6 @@ impl NetServer {
             PacketType::BatchedPayload { channel } => {
                 if let Some(conn) = self.connections.get_mut(&addr) {
                     conn.touch_recv_time();
-                    // Process reliability/ACK info from header
                     conn.process_incoming_header(&packet.header);
                     if let Some(messages) = congestion::unbatch_messages(&packet.payload) {
                         for msg in messages {
@@ -371,7 +356,6 @@ impl NetServer {
                 if let Some(conn) = self.connections.get_mut(&addr) {
                     conn.touch_recv_time();
                     conn.process_incoming_header(&packet.header);
-                    // Send ACK back
                     self.send_raw(addr, PacketType::MtuProbeAck { probe_size });
                 }
             }

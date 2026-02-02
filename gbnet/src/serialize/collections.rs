@@ -1,3 +1,4 @@
+//! BitSerialize/BitDeserialize implementations for collection types (String, Vec, Option, tuples, arrays).
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::debug;
 use std::io::{self, Read, Write};
@@ -5,7 +6,6 @@ use std::io::{self, Read, Write};
 use super::bit_io;
 use super::{BitDeserialize, BitSerialize, ByteAlignedDeserialize, ByteAlignedSerialize};
 
-// String implementations
 impl BitSerialize for String {
     fn bit_serialize<W: bit_io::BitWrite>(&self, writer: &mut W) -> io::Result<()> {
         const DEFAULT_MAX_LEN: usize = 65535; // 16 bits for length
@@ -72,7 +72,6 @@ impl ByteAlignedDeserialize for String {
     }
 }
 
-// Fixed-size array implementations
 macro_rules! impl_array {
     ($($n:expr),*) => {
         $(
@@ -122,7 +121,6 @@ impl_array!(
     1024
 );
 
-// Tuple implementations
 impl<T: BitSerialize, U: BitSerialize> BitSerialize for (T, U) {
     fn bit_serialize<W: bit_io::BitWrite>(&self, writer: &mut W) -> io::Result<()> {
         self.0.bit_serialize(writer)?;
@@ -196,7 +194,6 @@ impl<T: ByteAlignedDeserialize, U: ByteAlignedDeserialize, V: ByteAlignedDeseria
     }
 }
 
-// 4-tuple
 impl<T: BitSerialize, U: BitSerialize, V: BitSerialize, W: BitSerialize> BitSerialize
     for (T, U, V, W)
 {
@@ -321,7 +318,6 @@ impl<T: ByteAlignedDeserialize> ByteAlignedDeserialize for Vec<T> {
     }
 }
 
-// Option<T> implementations
 impl<T: BitSerialize> BitSerialize for Option<T> {
     fn bit_serialize<W: bit_io::BitWrite>(&self, writer: &mut W) -> std::io::Result<()> {
         match self {

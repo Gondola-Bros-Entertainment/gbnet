@@ -1,4 +1,4 @@
-// security.rs - CRC32 integrity, connect tokens, and optional encryption
+//! CRC32C integrity, connect-token authentication, rate limiting, and optional AES-256-GCM encryption.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -121,20 +121,15 @@ impl TokenValidator {
             return Err(TokenError::Expired);
         }
 
-        // Check for replay
         if self.used_tokens.contains_key(&token.client_id) {
             return Err(TokenError::Replayed);
         }
 
-        // Mark as used
         self.used_tokens.insert(token.client_id, Instant::now());
 
-        // Enforce bounded size
         if self.used_tokens.len() > self.max_tracked_tokens {
-            // First try removing expired
             self.cleanup();
 
-            // If still over limit, evict oldest entries
             while self.used_tokens.len() > self.max_tracked_tokens {
                 let oldest_key = self
                     .used_tokens
@@ -164,6 +159,7 @@ impl TokenValidator {
     }
 }
 
+/// Errors returned when validating a connect token.
 #[derive(Debug)]
 pub enum TokenError {
     Expired,
@@ -300,6 +296,7 @@ impl std::fmt::Debug for EncryptionState {
     }
 }
 
+/// Errors from the AES-256-GCM encryption subsystem.
 #[derive(Debug)]
 pub enum EncryptionError {
     InvalidKey,

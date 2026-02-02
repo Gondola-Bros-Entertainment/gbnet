@@ -72,7 +72,6 @@ impl NetClient {
     pub fn update(&mut self) -> Vec<ClientEvent> {
         let mut events = Vec::new();
 
-        // Check for connection timeout during handshake
         if matches!(
             self.state,
             ClientState::Connecting | ClientState::ChallengeResponse
@@ -85,7 +84,6 @@ impl NetClient {
             }
         }
 
-        // Receive packets
         loop {
             match self.socket.recv_from() {
                 Ok((data, addr)) => {
@@ -103,7 +101,6 @@ impl NetClient {
                     if packet.header.protocol_id != self.connection.config().protocol_id {
                         continue;
                     }
-                    // Track received bytes
                     self.connection.record_bytes_received(validated.len());
                     self.handle_packet(packet, &mut events);
                 }
@@ -113,14 +110,12 @@ impl NetClient {
         }
 
         if self.state == ClientState::Connected {
-            // Run the connection tick (retransmission, keepalive, congestion control)
             if let Err(_e) = self.connection.update_tick() {
                 self.state = ClientState::Disconnected;
                 events.push(ClientEvent::Disconnected(DisconnectReason::Timeout));
                 return events;
             }
 
-            // Drain the send queue and send packets over the wire
             let packets = self.connection.drain_send_queue();
             for packet in packets {
                 if let Ok(data) = packet.serialize() {
@@ -136,7 +131,6 @@ impl NetClient {
                 }
             }
 
-            // Deliver received messages to the caller
             let channel_count = self.connection.channel_count();
             for ch in 0..channel_count as u8 {
                 while let Some(data) = self.connection.receive(ch) {
@@ -170,7 +164,6 @@ impl NetClient {
     pub fn reconnect(&mut self) {
         self.connection.reset_connection();
         self.connection.set_state(ConnectionState::Disconnected);
-        // Reset stats on reconnect
         self.connection.stats = NetworkStats::default();
         self.connected_notified = false;
         self.state = ClientState::Connecting;
@@ -223,7 +216,6 @@ impl NetClient {
                     client_salt: self.connection.client_salt(),
                 });
             }
-            // Dedup: duplicate challenge while already responding — resend response
             (ClientState::ChallengeResponse, PacketType::ConnectionChallenge { .. }) => {
                 self.send_raw(PacketType::ConnectionResponse {
                     client_salt: self.connection.client_salt(),

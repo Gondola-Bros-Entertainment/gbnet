@@ -1,4 +1,5 @@
-// congestion.rs - Binary congestion control (Gaffer-style) and message batching
+//! Binary congestion control (Gaffer-style Good/Bad modes), byte-budget gating,
+//! adaptive recovery timer, message batching, and bandwidth tracking.
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -8,12 +9,12 @@ pub const BATCH_HEADER_SIZE: usize = 1;
 pub const BATCH_LENGTH_SIZE: usize = 2;
 pub const MAX_BATCH_MESSAGES: u8 = 255;
 
-// Adaptive recovery constants
 pub const MIN_RECOVERY_SECS: f64 = 1.0;
 pub const MAX_RECOVERY_SECS: f64 = 60.0;
 pub const RECOVERY_HALVE_INTERVAL_SECS: f64 = 10.0;
 pub const QUICK_DROP_THRESHOLD_SECS: f64 = 10.0;
 
+/// Binary congestion state: either network conditions are acceptable or degraded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CongestionMode {
     Good,
@@ -30,11 +31,9 @@ pub struct CongestionController {
     base_send_rate: f32,
     current_send_rate: f32,
 
-    // Byte-based send budget per tick
     budget_bytes_remaining: i64,
     bytes_per_tick: usize,
 
-    // Adaptive recovery timer
     adaptive_recovery_secs: f64,
     last_good_entry: Option<Instant>,
     last_bad_entry: Option<Instant>,
@@ -81,8 +80,7 @@ impl CongestionController {
         match self.mode {
             CongestionMode::Good => {
                 if is_bad {
-                    // Good → Bad transition
-                    // Check if we dropped back quickly after last recovery
+                    // Quick re-entry to Bad doubles recovery timer
                     if let Some(good_entry) = self.last_good_entry {
                         if good_entry.elapsed().as_secs_f64() < QUICK_DROP_THRESHOLD_SECS {
                             self.adaptive_recovery_secs =
@@ -95,19 +93,15 @@ impl CongestionController {
                     self.current_send_rate =
                         (self.base_send_rate * CONGESTION_RATE_REDUCTION).max(MIN_SEND_RATE);
                     self.good_conditions_start = None;
-                } else {
-                    // Sustained good: halve adaptive_recovery_secs every 10s
-                    if let Some(good_entry) = self.last_good_entry {
-                        let elapsed = good_entry.elapsed().as_secs_f64();
-                        let intervals = (elapsed / RECOVERY_HALVE_INTERVAL_SECS).floor() as u32;
-                        if intervals > 0 {
-                            for _ in 0..intervals {
-                                self.adaptive_recovery_secs =
-                                    (self.adaptive_recovery_secs / 2.0).max(MIN_RECOVERY_SECS);
-                            }
-                            // Reset to avoid repeated halving for same intervals
-                            self.last_good_entry = Some(Instant::now());
+                } else if let Some(good_entry) = self.last_good_entry {
+                    let elapsed = good_entry.elapsed().as_secs_f64();
+                    let intervals = (elapsed / RECOVERY_HALVE_INTERVAL_SECS).floor() as u32;
+                    if intervals > 0 {
+                        for _ in 0..intervals {
+                            self.adaptive_recovery_secs =
+                                (self.adaptive_recovery_secs / 2.0).max(MIN_RECOVERY_SECS);
                         }
+                        self.last_good_entry = Some(Instant::now());
                     }
                 }
             }
@@ -120,7 +114,6 @@ impl CongestionController {
                         Some(start) => {
                             let required = Duration::from_secs_f64(self.adaptive_recovery_secs);
                             if start.elapsed() >= required {
-                                // Bad → Good transition
                                 self.mode = CongestionMode::Good;
                                 self.last_good_entry = Some(Instant::now());
                                 self.current_send_rate = self.base_send_rate;
@@ -167,7 +160,6 @@ pub fn batch_messages(messages: &[Vec<u8>], max_size: usize) -> Vec<Vec<u8>> {
     for msg in messages {
         let msg_wire_size = BATCH_LENGTH_SIZE + msg.len();
         if current_size + msg_wire_size > max_size && msg_count > 0 {
-            // Finalize current batch
             let mut batch = Vec::with_capacity(current_size);
             batch.push(msg_count);
             batch.extend_from_slice(&current_batch);

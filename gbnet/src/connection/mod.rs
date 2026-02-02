@@ -1,4 +1,5 @@
-// connection - Connection state management for reliable UDP
+//! Connection state machine for reliable UDP: handshake, channels,
+//! reliability tracking, congestion control, and fragmentation.
 use rand::random;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -17,6 +18,7 @@ use crate::{
 mod handshake;
 mod io;
 
+/// States of the connection state machine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionState {
     Disconnected,
@@ -26,6 +28,7 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
+/// Errors that can occur during connection operations.
 #[derive(Debug)]
 pub enum ConnectionError {
     NotConnected,
@@ -71,6 +74,7 @@ impl From<ChannelError> for ConnectionError {
     }
 }
 
+/// Typed disconnect reason decoded from the wire `u8` code.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DisconnectReason {
     Timeout,
@@ -94,54 +98,45 @@ impl From<u8> for DisconnectReason {
     }
 }
 
+/// A single peer connection managing handshake, channels, reliability, and congestion.
 pub struct Connection {
     pub(crate) config: NetworkConfig,
     pub(crate) state: ConnectionState,
     pub(crate) local_addr: SocketAddr,
     pub(crate) remote_addr: SocketAddr,
 
-    // Handshake
     pub(crate) client_salt: u64,
     pub(crate) server_salt: u64,
 
-    // Timing
     pub(crate) last_packet_send_time: Instant,
     pub(crate) last_packet_recv_time: Instant,
     pub(crate) connection_start_time: Option<Instant>,
     pub(crate) connection_request_time: Option<Instant>,
     pub(crate) connection_retry_count: u32,
 
-    // Reliability
     pub(crate) local_sequence: u16,
     pub(crate) remote_sequence: u16,
     pub(crate) ack_bits: u32,
     pub(crate) reliability: ReliableEndpoint,
 
-    // Channels
     pub(crate) channels: Vec<Channel>,
 
-    // Queues
     pub(crate) send_queue: VecDeque<Packet>,
     pub(crate) recv_queue: VecDeque<Packet>,
 
-    // Subsystems
     pub(crate) congestion: CongestionController,
     pub(crate) bandwidth_up: BandwidthTracker,
     pub(crate) bandwidth_down: BandwidthTracker,
     pub(crate) fragment_assembler: FragmentAssembler,
     pub(crate) mtu_discovery: MtuDiscovery,
 
-    // Encryption
     #[cfg(feature = "encryption")]
     pub(crate) encryption_state: Option<crate::security::EncryptionState>,
 
-    // Channel priority ordering (indices sorted by priority, ascending)
     pub(crate) channel_priority_order: Vec<usize>,
 
-    // Stats
     pub(crate) stats: NetworkStats,
 
-    // Disconnect tracking
     pub(crate) disconnect_retry_count: u32,
     pub(crate) disconnect_time: Option<Instant>,
 }
@@ -163,7 +158,6 @@ impl Connection {
             }
         }
 
-        // Build channel priority order
         let mut channel_priority_order: Vec<usize> = (0..channels.len()).collect();
         channel_priority_order.sort_by_key(|&i| channels[i].config_priority());
 
@@ -351,7 +345,6 @@ impl Connection {
             self.remote_sequence = header.sequence;
         }
 
-        // Process piggybacked ACKs — acknowledge channel pending_ack entries
         for channel in &mut self.channels {
             if channel.is_reliable() {
                 channel.acknowledge_message(header.ack);
@@ -364,7 +357,6 @@ impl Connection {
             }
         }
 
-        // Process ACKs in the reliability endpoint (for RTT, loss tracking)
         self.reliability.process_acks(header.ack, header.ack_bits);
     }
 

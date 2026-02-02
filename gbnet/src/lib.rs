@@ -41,7 +41,6 @@
 
 extern crate self as gbnet;
 
-// Core networking modules
 pub mod channel;
 pub mod client;
 pub mod config;
@@ -62,7 +61,6 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
-// Re-export main types
 pub use channel::{Channel, ChannelError};
 pub use client::{ClientEvent, NetClient};
 pub use config::{ChannelConfig, ConfigError, DeliveryMode, NetworkConfig, SimulationConfig};
@@ -83,11 +81,8 @@ pub use util::{sequence_diff, sequence_greater_than};
 
 pub use gbnet_macros::NetworkSerialize;
 
-// Re-export serialization traits and types
 pub use serialize::bit_io::{BitBuffer, BitRead, BitWrite};
 pub use serialize::{BitDeserialize, BitSerialize, ByteAlignedDeserialize, ByteAlignedSerialize};
-
-// Re-export commonly used std types
 pub use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Unified error type encompassing all GB-Net error variants.

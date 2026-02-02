@@ -111,7 +111,6 @@ impl Connection {
                         }
                     }
                     PacketType::MtuProbe { probe_size } => {
-                        // Respond with ACK
                         let header = self.create_header();
                         let ack_packet =
                             Packet::new(header, PacketType::MtuProbeAck { probe_size });
@@ -150,7 +149,7 @@ impl Connection {
         for channel in &mut self.channels {
             if channel.is_reliable() {
                 channel.acknowledge_message(ack);
-                for i in 0..32u16 {
+                for i in 0..crate::reliability::ACK_BITS_WINDOW {
                     if (ack_bits & (1 << i)) != 0 {
                         let acked_seq = ack.wrapping_sub(i + 1);
                         channel.acknowledge_message(acked_seq);
@@ -175,7 +174,6 @@ impl Connection {
             channel.reset();
         }
 
-        // Reset subsystems
         self.congestion = crate::congestion::CongestionController::new(
             self.config.send_rate,
             self.config.congestion_bad_loss_threshold,

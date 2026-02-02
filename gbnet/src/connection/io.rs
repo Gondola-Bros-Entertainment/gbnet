@@ -23,7 +23,6 @@ impl Connection {
     pub fn update_tick(&mut self) -> Result<(), ConnectionError> {
         let now = Instant::now();
 
-        // Check for timeout
         if self.state != ConnectionState::Disconnected
             && self.state != ConnectionState::Disconnecting
         {
@@ -35,7 +34,6 @@ impl Connection {
             }
         }
 
-        // Cleanup expired fragment buffers (runs in all states)
         self.fragment_assembler.cleanup();
 
         match self.state {
@@ -54,20 +52,15 @@ impl Connection {
                 }
             }
             ConnectionState::Connected => {
-                // Update congestion control
                 self.congestion
                     .update(self.stats.packet_loss, self.stats.rtt);
-
-                // Refill byte budget at tick start
                 self.congestion.refill_budget(self.config.mtu);
 
-                // Send keepalive if needed
                 let time_since_send = now.duration_since(self.last_packet_send_time);
                 if time_since_send > self.config.keepalive_interval {
                     self.send_keepalive()?;
                 }
 
-                // MTU discovery probing
                 if let Some(probe_size) = self.mtu_discovery.next_probe() {
                     let header = self.create_header();
                     let padding = vec![0u8; probe_size.saturating_sub(16)];
@@ -81,14 +74,10 @@ impl Connection {
                     self.send_queue.push_back(packet);
                 }
 
-                // Track packets sent this cycle for congestion limiting
                 let mut packets_sent_this_cycle: u32 = 0;
-
-                // Drain channel outgoing messages in priority order
                 let priority_order = self.channel_priority_order.clone();
                 for &ch_idx in &priority_order {
                     loop {
-                        // Estimate packet size for budget check (header + typical overhead)
                         let estimated_size = self.config.mtu;
                         if !self
                             .congestion
@@ -120,7 +109,6 @@ impl Connection {
                         }
                     }
 
-                    // Handle retransmissions
                     let rto = self.reliability.rto();
                     let retransmits = self.channels[ch_idx].get_retransmit_messages(now, rto);
                     for (_seq, wire_data) in retransmits {
@@ -137,12 +125,10 @@ impl Connection {
                     }
                 }
 
-                // Update channel state (ordered buffer timeouts, etc.)
                 for channel in &mut self.channels {
                     channel.update();
                 }
 
-                // Update reliability system (retransmit timed-out packets)
                 let packets_to_retry = self.reliability.update(now);
                 for (sequence, data) in packets_to_retry {
                     let mut header = self.create_header();
@@ -182,7 +168,6 @@ impl Connection {
             _ => {}
         }
 
-        // Update stats
         self.stats.rtt = self.reliability.srtt_ms() as f32;
         self.stats.packet_loss = self.reliability.packet_loss_percent();
         self.stats.bandwidth_up = self.bandwidth_up.bytes_per_second() as f32;

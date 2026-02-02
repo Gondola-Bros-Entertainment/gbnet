@@ -1,4 +1,5 @@
-// simulator.rs - Network condition simulator for testing
+//! Network condition simulator for testing: packet loss, latency, jitter,
+//! duplicates, reordering, and bandwidth limiting.
 use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -38,12 +39,10 @@ impl NetworkSimulator {
         let mut rng = rand::thread_rng();
         let mut result = Vec::new();
 
-        // Packet loss
         if self.config.packet_loss > 0.0 && rng.gen::<f32>() < self.config.packet_loss {
-            return result; // Dropped
+            return result;
         }
 
-        // Bandwidth limit (token bucket)
         if self.config.bandwidth_limit_bytes_per_sec > 0 {
             self.refill_tokens();
             if self.token_bucket_tokens < data.len() as f64 {
@@ -52,7 +51,6 @@ impl NetworkSimulator {
             self.token_bucket_tokens -= data.len() as f64;
         }
 
-        // Calculate delay
         let base_latency = self.config.latency_ms as f64;
         let jitter = if self.config.jitter_ms > 0 {
             rng.gen_range(0.0..self.config.jitter_ms as f64)
@@ -61,7 +59,6 @@ impl NetworkSimulator {
         };
         let delay_ms = base_latency + jitter;
 
-        // Out of order: add random extra delay
         let extra = if self.config.out_of_order_chance > 0.0
             && rng.gen::<f32>() < self.config.out_of_order_chance
         {
@@ -83,7 +80,6 @@ impl NetworkSimulator {
             });
         }
 
-        // Duplicate
         if self.config.duplicate_chance > 0.0 && rng.gen::<f32>() < self.config.duplicate_chance {
             let dup_delay = Duration::from_millis((delay_ms + rng.gen_range(0.0..20.0)) as u64);
             self.delayed_packets.push_back(DelayedPacket {
@@ -117,7 +113,6 @@ impl NetworkSimulator {
         let elapsed = self.last_token_refill.elapsed().as_secs_f64();
         self.last_token_refill = Instant::now();
         self.token_bucket_tokens += elapsed * self.config.bandwidth_limit_bytes_per_sec as f64;
-        // Cap at 1 second worth of tokens
         let max = self.config.bandwidth_limit_bytes_per_sec as f64;
         if self.token_bucket_tokens > max {
             self.token_bucket_tokens = max;
@@ -129,7 +124,6 @@ impl NetworkSimulator {
     }
 }
 
-// Re-export from stats for backward compatibility
 pub use crate::stats::{assess_connection_quality, ConnectionQuality};
 
 #[cfg(test)]

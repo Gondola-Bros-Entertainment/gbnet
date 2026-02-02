@@ -1,10 +1,10 @@
+//! BitSerialize/BitDeserialize implementations for primitive types (u8..u64, i8..i64, f32, f64, bool).
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 
 use super::bit_io;
 use super::{BitDeserialize, BitSerialize, ByteAlignedDeserialize, ByteAlignedSerialize};
 
-// Primitive Implementations for u8 and i8 (no endianness)
 macro_rules! impl_primitive_single_byte {
     ($($t:ty, $bits:expr, $write:ident, $read:ident),*) => {
         $(
@@ -36,7 +36,6 @@ macro_rules! impl_primitive_single_byte {
     };
 }
 
-// Primitive Implementations for multi-byte integer types (with LittleEndian)
 macro_rules! impl_primitive_multi_byte {
     ($($t:ty, $bits:expr, $write:ident, $read:ident),*) => {
         $(

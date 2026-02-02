@@ -1,4 +1,4 @@
-// util.rs - Shared sequence number utilities
+//! Shared sequence number utilities for u16 wraparound arithmetic.
 
 /// Half the u16 sequence space, used for wraparound comparison.
 const SEQUENCE_HALF_RANGE: u16 = 32768;
