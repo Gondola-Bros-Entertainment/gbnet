@@ -10,14 +10,21 @@
 //!
 //! - **5 delivery modes**: Unreliable, UnreliableSequenced, ReliableUnordered,
 //!   ReliableOrdered, ReliableSequenced
-//! - **Bitpacked serialization** with `#[derive(NetworkSerialize)]` and `#[bits = N]`
-//! - **Adaptive reliability**: Jacobson/Karels RTT, channel-owned retransmission
-//!   with exponential backoff, bounded in-flight tracking
-//! - **Binary congestion control** with message batching
-//! - **Auto fragmentation** when payloads exceed the fragment threshold, with MTU
-//!   discovery and probe timeout detection
-//! - **Security**: CRC32C integrity, IP-based rate limiting, deserialization bounds
-//!   checking, optional AES-256-GCM encryption with per-connection nonce salt
+//! - **Bitpacked serialization** with `#[derive(NetworkSerialize)]`, `#[bits = N]`,
+//!   `#[with]`, `#[skip_if]`, and `#[variant_id]` attributes
+//! - **Adaptive reliability**: Jacobson/Karels RTT, fast retransmit (NACK-based),
+//!   64-bit ACK window, ACK-only packets, bounded in-flight tracking
+//! - **Congestion control**: Binary good/bad mode + optional cwnd-based window
+//!   (SlowStart/Avoidance/Recovery) with packet pacing and message batching
+//! - **Auto fragmentation** with per-fragment retransmission, 32-bit fragment IDs,
+//!   MTU discovery, and probe timeout detection
+//! - **Security**: CRC32C integrity, stateless cookie handshake, IP-based rate
+//!   limiting, deserialization bounds checking, optional AES-256-GCM encryption
+//! - **Delta compression**: `#[derive(NetworkDelta)]` for bitmask-based delta
+//!   encoding with baseline tracking and automatic full-state fallback
+//! - **Replication**: Priority accumulator, radius and grid interest management
+//! - **Interpolation**: Client-side snapshot buffer with configurable playback delay
+//! - **Connection migration**: Address change detection with rate-limited cooldown
 //! - **Reliable disconnect** with configurable retry and backoff
 //!
 //! ## Quick Start

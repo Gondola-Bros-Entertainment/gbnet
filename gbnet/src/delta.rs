@@ -31,6 +31,7 @@ pub struct DeltaTracker<T: NetworkDelta> {
 }
 
 impl<T: NetworkDelta + BitSerialize + BitDeserialize + Clone> DeltaTracker<T> {
+    /// Create a new delta tracker with the given maximum pending snapshot count.
     pub fn new(max_pending: usize) -> Self {
         Self {
             pending: VecDeque::with_capacity(max_pending),
@@ -128,6 +129,7 @@ pub struct BaselineManager<T> {
 }
 
 impl<T: Clone> BaselineManager<T> {
+    /// Create a new baseline manager with the given capacity and expiration timeout.
     pub fn new(max_snapshots: usize, timeout: Duration) -> Self {
         Self {
             snapshots: VecDeque::with_capacity(max_snapshots),

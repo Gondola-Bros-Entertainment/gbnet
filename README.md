@@ -59,6 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ServerEvent::ClientDisconnected(addr, reason) => {
                     println!("Disconnected: {addr} ({reason})");
                 }
+                ServerEvent::ClientMigrated { old_addr, new_addr } => {
+                    println!("Migrated: {old_addr} -> {new_addr}");
+                }
             }
         }
     }
@@ -155,17 +158,21 @@ Per-message reliability override is supported — send a reliable message on an 
 
 | | |
 |---|---|
-| **Serialization** | Bitpacked encoding, derive macro, field-level `#[bits = N]` control, byte-aligned mode |
-| **Reliability** | Jacobson/Karels RTT, channel-owned retransmission with exponential backoff, bounded in-flight tracking |
-| **Fragmentation** | Auto split/reassembly when payload exceeds threshold, per-message timeout, memory-bounded buffers |
+| **Serialization** | Bitpacked encoding, derive macro, field-level `#[bits = N]` control, `#[with]` custom codecs, `#[skip_if]` conditional fields, byte-aligned mode |
+| **Reliability** | Jacobson/Karels RTT, channel-owned retransmission with exponential backoff, fast retransmit (NACK-based), 64-bit ACK window, ACK-only packets, bounded in-flight tracking |
+| **Fragmentation** | Auto split/reassembly, per-fragment retransmission, 32-bit fragment IDs, per-message timeout, memory-bounded buffers |
 | **MTU Discovery** | Binary search probing with automatic probe timeout detection |
-| **Security** | CRC32C integrity, challenge-response handshake, IP-based rate limiting, deserialization bounds checking, AES-256-GCM encryption with per-connection nonce salt (optional) |
-| **Congestion** | Binary good/bad mode, packet loss + RTT monitoring, send rate limiting |
+| **Security** | CRC32C integrity, stateless cookie handshake (amplification mitigation), challenge-response, IP-based rate limiting, deserialization bounds checking, AES-256-GCM encryption with full-entropy nonce salt (optional) |
+| **Congestion** | Binary good/bad mode, optional cwnd-based congestion window (SlowStart/Avoidance/Recovery), packet pacing, send rate limiting |
+| **Delta Compression** | `#[derive(NetworkDelta)]` for bitmask-based delta encoding, baseline tracking, automatic fallback to full state |
+| **Replication** | Priority accumulator for bandwidth-limited entity sends, interest management (radius + grid AoI) |
+| **Interpolation** | Client-side snapshot buffer with configurable playback delay and linear interpolation |
 | **Batching** | Pack multiple small messages into single UDP packets |
 | **Simulation** | Configurable loss, latency, jitter, duplicates, reordering, bandwidth limits |
-| **Diagnostics** | Per-connection RTT, packet loss %, bandwidth up/down, channel stats, connection quality |
+| **Diagnostics** | Per-connection RTT, packet loss %, bandwidth up/down, channel stats, message drop counters, connection quality |
 | **Disconnect** | Reliable disconnect with configurable retry and backoff (client and server) |
 | **Reconnection** | Client-side `reconnect()` with full state reset and new handshake |
+| **Migration** | Connection migration across address changes with rate-limited cooldown |
 
 ---
 
@@ -179,6 +186,12 @@ Per-message reliability override is supported — send a reliable message on an 
 | `#[default_max_len = 100]` | struct/enum | Default max length for Vec/String |
 | `#[bits = 4]` | enum | Bits for variant discriminant |
 
+### Variant
+
+| Attribute | Description |
+|---|---|
+| `#[variant_id = N]` | Pin enum variant to a specific discriminant value (stable wire format) |
+
 ### Field
 
 | Attribute | Description |
@@ -187,6 +200,71 @@ Per-message reliability override is supported — send a reliable message on an 
 | `#[byte_align]` | Pad to byte boundary before this field |
 | `#[no_serialize]` | Skip field (uses `Default` on deserialize) |
 | `#[max_len = N]` | Max length for Vec/String |
+| `#[with = "path"]` | Use custom serialize/deserialize functions at `path` |
+| `#[skip_if = "expr"]` | Conditionally skip field with 1-bit presence flag |
+
+---
+
+## Delta Compression
+
+Derive delta structs automatically for bandwidth-efficient state replication:
+
+```rust
+use gbnet::{NetworkSerialize, NetworkDelta, BitSerialize, BitDeserialize};
+
+#[derive(NetworkSerialize, NetworkDelta, Clone, Debug, PartialEq)]
+struct PlayerState {
+    #[bits = 10]
+    x: u16,
+    #[bits = 10]
+    y: u16,
+    #[bits = 7]
+    health: u8,
+}
+
+// Generates `PlayerStateDelta` with Option<T> per field + bitmask serialization
+let baseline = PlayerState { x: 100, y: 200, health: 80 };
+let current = PlayerState { x: 105, y: 200, health: 80 };
+let delta = current.diff(&baseline);  // Only x changed — 1-bit bitmask + 10-bit value
+
+let mut updated = baseline.clone();
+updated.apply(&delta);
+assert_eq!(updated, current);
+```
+
+Use `DeltaTracker` and `BaselineManager` for wire-level delta transport with automatic baseline ACK tracking and fallback to full state.
+
+---
+
+## Snapshot Interpolation
+
+Smooth client-side rendering with buffered interpolation:
+
+```rust
+use gbnet::{Interpolatable, SnapshotBuffer};
+
+#[derive(Clone)]
+struct Position { x: f32, y: f32 }
+
+impl Interpolatable for Position {
+    fn lerp(&self, other: &Self, t: f32) -> Self {
+        Position {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+        }
+    }
+}
+
+let mut buffer = SnapshotBuffer::with_config(3, 100.0); // 100ms playback delay
+buffer.push(0.0, Position { x: 0.0, y: 0.0 });
+buffer.push(50.0, Position { x: 10.0, y: 5.0 });
+buffer.push(100.0, Position { x: 20.0, y: 10.0 });
+
+// Sample at render time (behind by playback delay)
+if let Some(pos) = buffer.sample(150.0) {
+    // Interpolated position at t=50ms
+}
+```
 
 ---
 
@@ -195,7 +273,7 @@ Per-message reliability override is supported — send a reliable message on an 
 ```
 gbnet/
 ├── src/
-│   ├── lib.rs              # Public API, re-exports
+│   ├── lib.rs              # Public API, re-exports, prelude
 │   ├── config.rs           # NetworkConfig, ChannelConfig, DeliveryMode
 │   ├── serialize/
 │   │   ├── mod.rs          # BitBuffer, traits, bit_io
@@ -204,14 +282,18 @@ gbnet/
 │   ├── packet.rs           # Packet header/type, wire format
 │   ├── channel.rs          # 5 delivery modes, ACK tracking
 │   ├── connection/
-│   │   ├── mod.rs          # Connection state machine
+│   │   ├── mod.rs          # Connection state machine, migration
 │   │   ├── handshake.rs    # Challenge-response handshake, dedup
-│   │   └── io.rs           # Send/receive, queue management
-│   ├── reliability.rs      # RTT estimation, retransmit, loss tracking
-│   ├── security.rs         # CRC32C, tokens, rate limiting, AES-GCM
-│   ├── fragment.rs         # Fragmentation/reassembly, MTU discovery
-│   ├── congestion.rs       # Congestion control, message batching
-│   ├── server.rs           # NetServer API
+│   │   └── io.rs           # Send/receive, queue management, cwnd pacing
+│   ├── reliability.rs      # RTT estimation, fast retransmit, 64-bit ACK window
+│   ├── security.rs         # CRC32C, stateless cookies, rate limiting, AES-GCM
+│   ├── fragment.rs         # Fragmentation/reassembly, per-fragment retransmit, MTU discovery
+│   ├── congestion.rs       # Binary + cwnd congestion control, pacing, batching
+│   ├── delta.rs            # Delta compression transport, baseline tracking
+│   ├── priority.rs         # Priority accumulator for entity replication
+│   ├── interest.rs         # Area-of-interest filtering (radius, grid)
+│   ├── interpolation.rs    # Snapshot interpolation buffer
+│   ├── server.rs           # NetServer API, connection migration
 │   ├── client.rs           # NetClient API (connect, reconnect, send)
 │   ├── simulator.rs        # Network condition simulator
 │   ├── wire.rs             # Shared packet utilities
@@ -226,7 +308,8 @@ gbnet/
 
 gbnet_macros/
 └── src/
-    └── lib.rs              # #[derive(NetworkSerialize)]
+    ├── lib.rs              # #[derive(NetworkSerialize)]
+    └── delta.rs            # #[derive(NetworkDelta)]
 ```
 
 ---
