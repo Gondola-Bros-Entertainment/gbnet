@@ -1,0 +1,15 @@
+[package]
+name = "gbnet_macros"
+version = "0.1.0"
+edition = "2021"
+description = "Proc macros for gbnet game networking library"
+license = "MIT"
+repository = "https://github.com/gondola-bros-entertainment/GB-Net"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }

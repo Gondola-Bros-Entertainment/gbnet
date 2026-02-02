@@ -1,0 +1,28 @@
+[package]
+name = "gbnet"
+version = "0.1.0"
+edition = "2021"
+description = "Production-ready game networking library providing reliable UDP transport with bitpacked serialization"
+license = "MIT"
+repository = "https://github.com/gondola-bros-entertainment/GB-Net"
+keywords = ["gamedev", "networking", "udp", "reliable", "serialization"]
+categories = ["game-development", "network-programming"]
+
+[features]
+default = []
+encryption = ["ring"]
+
+[dependencies]
+byteorder = "1.5"
+gbnet_macros = { path = "../gbnet_macros" }
+log = "0.4.27"
+rand = "0.8"
+ring = { version = "0.17", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+env_logger = "0.11.8"
+
+[[bench]]
+name = "throughput"
+harness = false

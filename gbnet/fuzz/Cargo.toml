@@ -1,0 +1,30 @@
+[package]
+name = "gbnet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gbnet = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_packet_deserialize"
+path = "fuzz_targets/fuzz_packet_deserialize.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fragment_reassembly"
+path = "fuzz_targets/fuzz_fragment_reassembly.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_bitbuffer"
+path = "fuzz_targets/fuzz_bitbuffer.rs"
+doc = false
