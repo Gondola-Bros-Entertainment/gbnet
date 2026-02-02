@@ -17,6 +17,7 @@ byteorder = "1.5"
 gbnet_macros = { path = "../gbnet_macros" }
 log = "0.4.27"
 rand = "0.8"
+smallvec = "1.13"
 ring = { version = "0.17", optional = true }
 
 [dev-dependencies]

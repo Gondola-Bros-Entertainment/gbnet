@@ -178,6 +178,9 @@ impl FragmentAssembler {
 
     /// Process a fragment. Returns the reassembled message if all fragments arrived.
     pub fn process_fragment(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        // Cleanup expired entries first to ensure accurate budget
+        self.cleanup();
+
         let header = FragmentHeader::deserialize(data)?;
         let fragment_data = data[FRAGMENT_HEADER_SIZE..].to_vec();
         let fragment_size = fragment_data.len();
@@ -216,15 +219,21 @@ impl FragmentAssembler {
     /// Remove expired incomplete fragment buffers.
     pub fn cleanup(&mut self) {
         let timeout = self.timeout;
+        let mut removed_size = 0;
         self.buffers.retain(|_, buf| {
             let keep = buf.created_at.elapsed() < timeout;
             if !keep {
-                // We'd subtract buf.total_size but since we're removing, that's handled
+                removed_size += buf.total_size;
             }
             keep
         });
-        // Recalculate size
-        self.current_buffer_size = self.buffers.values().map(|b| b.total_size).sum();
+        self.current_buffer_size = self.current_buffer_size.saturating_sub(removed_size);
+
+        debug_assert_eq!(
+            self.current_buffer_size,
+            self.buffers.values().map(|b| b.total_size).sum::<usize>(),
+            "Fragment buffer size tracking drifted"
+        );
     }
 
     fn expire_oldest(&mut self) {
@@ -452,5 +461,31 @@ mod tests {
         for frag in &fragments {
             let _ = assembler.process_fragment(frag);
         }
+    }
+
+    #[test]
+    fn test_cleanup_before_budget_check() {
+        // Verify that cleanup runs before the budget check in process_fragment
+        // Use a multi-fragment message so the buffer entry persists after inserting one fragment
+        let mut assembler = FragmentAssembler::new(Duration::from_millis(1), 200);
+
+        // Add first fragment of a 2-fragment message for message 1
+        let data1 = vec![0u8; 300];
+        let frags1 = fragment_message(1, &data1, 200).unwrap();
+        assert!(frags1.len() >= 2);
+        assembler.process_fragment(&frags1[0]);
+        assert!(assembler.buffers.contains_key(&1));
+
+        // Wait for timeout
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Now adding a new fragment should succeed because stale entries are purged first
+        let data2 = vec![1u8; 300];
+        let frags2 = fragment_message(2, &data2, 200).unwrap();
+        assembler.process_fragment(&frags2[0]);
+
+        // The old entry should be gone, new one present
+        assert!(!assembler.buffers.contains_key(&1));
+        assert!(assembler.buffers.contains_key(&2));
     }
 }

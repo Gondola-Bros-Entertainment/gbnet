@@ -8,6 +8,12 @@ pub const BATCH_HEADER_SIZE: usize = 1;
 pub const BATCH_LENGTH_SIZE: usize = 2;
 pub const MAX_BATCH_MESSAGES: u8 = 255;
 
+// Adaptive recovery constants
+pub const MIN_RECOVERY_SECS: f64 = 1.0;
+pub const MAX_RECOVERY_SECS: f64 = 60.0;
+pub const RECOVERY_HALVE_INTERVAL_SECS: f64 = 10.0;
+pub const QUICK_DROP_THRESHOLD_SECS: f64 = 10.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CongestionMode {
     Good,
@@ -19,11 +25,19 @@ pub enum CongestionMode {
 pub struct CongestionController {
     mode: CongestionMode,
     good_conditions_start: Option<Instant>,
-    recovery_time: Duration,
     loss_threshold: f32,
     rtt_threshold_ms: f32,
     base_send_rate: f32,
     current_send_rate: f32,
+
+    // Byte-based send budget per tick
+    budget_bytes_remaining: i64,
+    bytes_per_tick: usize,
+
+    // Adaptive recovery timer
+    adaptive_recovery_secs: f64,
+    last_good_entry: Option<Instant>,
+    last_bad_entry: Option<Instant>,
 }
 
 impl CongestionController {
@@ -33,15 +47,31 @@ impl CongestionController {
         rtt_threshold_ms: f32,
         recovery_time: Duration,
     ) -> Self {
+        let recovery_secs = recovery_time.as_secs_f64();
         Self {
             mode: CongestionMode::Good,
             good_conditions_start: None,
-            recovery_time,
             loss_threshold,
             rtt_threshold_ms,
             base_send_rate,
             current_send_rate: base_send_rate,
+            budget_bytes_remaining: 0,
+            bytes_per_tick: 0,
+            adaptive_recovery_secs: recovery_secs,
+            last_good_entry: None,
+            last_bad_entry: None,
         }
+    }
+
+    /// Refill the byte budget at the start of each tick.
+    pub fn refill_budget(&mut self, mtu: usize) {
+        self.bytes_per_tick = (self.current_send_rate * mtu as f32) as usize;
+        self.budget_bytes_remaining = self.bytes_per_tick as i64;
+    }
+
+    /// Deduct bytes from the send budget after queuing a packet.
+    pub fn deduct_budget(&mut self, bytes: usize) {
+        self.budget_bytes_remaining -= bytes as i64;
     }
 
     /// Update congestion state based on current network conditions.
@@ -51,10 +81,34 @@ impl CongestionController {
         match self.mode {
             CongestionMode::Good => {
                 if is_bad {
+                    // Good → Bad transition
+                    // Check if we dropped back quickly after last recovery
+                    if let Some(good_entry) = self.last_good_entry {
+                        if good_entry.elapsed().as_secs_f64() < QUICK_DROP_THRESHOLD_SECS {
+                            self.adaptive_recovery_secs =
+                                (self.adaptive_recovery_secs * 2.0).min(MAX_RECOVERY_SECS);
+                        }
+                    }
+
                     self.mode = CongestionMode::Bad;
+                    self.last_bad_entry = Some(Instant::now());
                     self.current_send_rate =
                         (self.base_send_rate * CONGESTION_RATE_REDUCTION).max(MIN_SEND_RATE);
                     self.good_conditions_start = None;
+                } else {
+                    // Sustained good: halve adaptive_recovery_secs every 10s
+                    if let Some(good_entry) = self.last_good_entry {
+                        let elapsed = good_entry.elapsed().as_secs_f64();
+                        let intervals = (elapsed / RECOVERY_HALVE_INTERVAL_SECS).floor() as u32;
+                        if intervals > 0 {
+                            for _ in 0..intervals {
+                                self.adaptive_recovery_secs =
+                                    (self.adaptive_recovery_secs / 2.0).max(MIN_RECOVERY_SECS);
+                            }
+                            // Reset to avoid repeated halving for same intervals
+                            self.last_good_entry = Some(Instant::now());
+                        }
+                    }
                 }
             }
             CongestionMode::Bad => {
@@ -64,8 +118,11 @@ impl CongestionController {
                             self.good_conditions_start = Some(Instant::now());
                         }
                         Some(start) => {
-                            if start.elapsed() >= self.recovery_time {
+                            let required = Duration::from_secs_f64(self.adaptive_recovery_secs);
+                            if start.elapsed() >= required {
+                                // Bad → Good transition
                                 self.mode = CongestionMode::Good;
+                                self.last_good_entry = Some(Instant::now());
                                 self.current_send_rate = self.base_send_rate;
                                 self.good_conditions_start = None;
                             }
@@ -86,11 +143,16 @@ impl CongestionController {
         self.current_send_rate
     }
 
+    pub fn adaptive_recovery_secs(&self) -> f64 {
+        self.adaptive_recovery_secs
+    }
+
     /// Returns true if a packet can be sent given the number of packets
-    /// already sent this update cycle. The send rate is in packets per second,
-    /// so this acts as a per-cycle budget when called once per tick.
-    pub fn can_send(&self, packets_sent_this_cycle: u32) -> bool {
+    /// already sent this update cycle and the packet's byte size.
+    /// Checks both packet count and byte budget.
+    pub fn can_send(&self, packets_sent_this_cycle: u32, packet_bytes: usize) -> bool {
         (packets_sent_this_cycle as f32) < self.current_send_rate
+            && self.budget_bytes_remaining >= packet_bytes as i64
     }
 }
 
@@ -270,11 +332,19 @@ mod tests {
     }
 
     #[test]
-    fn test_can_send_respects_rate() {
-        let cc = CongestionController::new(60.0, 0.1, 250.0, Duration::from_secs(10));
-        assert!(cc.can_send(0));
-        assert!(cc.can_send(59));
-        assert!(!cc.can_send(60));
+    fn test_can_send_respects_rate_and_budget() {
+        let mut cc = CongestionController::new(60.0, 0.1, 250.0, Duration::from_secs(10));
+        cc.refill_budget(1200);
+
+        assert!(cc.can_send(0, 1200));
+        assert!(cc.can_send(59, 1200));
+        assert!(!cc.can_send(60, 1200));
+
+        // Exhaust budget
+        for _ in 0..60 {
+            cc.deduct_budget(1200);
+        }
+        assert!(!cc.can_send(0, 1200));
     }
 
     #[test]
@@ -283,5 +353,44 @@ mod tests {
         tracker.record(1000);
         tracker.record(2000);
         assert!(tracker.bytes_per_second() > 0.0);
+    }
+
+    #[test]
+    fn test_byte_budget_depletes_and_replenishes() {
+        let mut cc = CongestionController::new(60.0, 0.1, 250.0, Duration::from_secs(10));
+        cc.refill_budget(1200);
+
+        let initial = cc.budget_bytes_remaining;
+        cc.deduct_budget(1200);
+        assert_eq!(cc.budget_bytes_remaining, initial - 1200);
+
+        // Refill
+        cc.refill_budget(1200);
+        assert_eq!(cc.budget_bytes_remaining, initial);
+    }
+
+    #[test]
+    fn test_adaptive_recovery_doubles_on_quick_drop() {
+        let mut cc = CongestionController::new(60.0, 0.1, 250.0, Duration::from_millis(50));
+
+        let initial_recovery = cc.adaptive_recovery_secs();
+
+        // Go to bad
+        cc.update(0.2, 100.0);
+        assert_eq!(cc.mode(), CongestionMode::Bad);
+
+        // Recover quickly
+        std::thread::sleep(Duration::from_millis(60));
+        cc.update(0.01, 50.0); // start good timer
+        std::thread::sleep(Duration::from_millis(60));
+        cc.update(0.01, 50.0); // should recover
+        assert_eq!(cc.mode(), CongestionMode::Good);
+
+        // Drop back to bad quickly (within 10s)
+        cc.update(0.2, 100.0);
+        assert_eq!(cc.mode(), CongestionMode::Bad);
+
+        // Recovery time should have doubled
+        assert!(cc.adaptive_recovery_secs() > initial_recovery);
     }
 }

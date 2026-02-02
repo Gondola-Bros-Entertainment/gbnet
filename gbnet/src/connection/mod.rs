@@ -135,6 +135,9 @@ pub struct Connection {
     #[cfg(feature = "encryption")]
     pub(crate) encryption_state: Option<crate::security::EncryptionState>,
 
+    // Channel priority ordering (indices sorted by priority, ascending)
+    pub(crate) channel_priority_order: Vec<usize>,
+
     // Stats
     pub(crate) stats: NetworkStats,
 
@@ -160,7 +163,12 @@ impl Connection {
             }
         }
 
+        // Build channel priority order
+        let mut channel_priority_order: Vec<usize> = (0..channels.len()).collect();
+        channel_priority_order.sort_by_key(|&i| channels[i].config_priority());
+
         let packet_buffer_size = config.packet_buffer_size;
+        let max_in_flight = config.max_in_flight;
         let congestion = CongestionController::new(
             config.send_rate,
             config.congestion_bad_loss_threshold,
@@ -193,8 +201,10 @@ impl Connection {
             local_sequence: 0,
             remote_sequence: 0,
             ack_bits: 0,
-            reliability: ReliableEndpoint::new(packet_buffer_size),
+            reliability: ReliableEndpoint::new(packet_buffer_size)
+                .with_max_in_flight(max_in_flight),
             channels,
+            channel_priority_order,
             congestion,
             bandwidth_up,
             bandwidth_down,
@@ -345,7 +355,7 @@ impl Connection {
         for channel in &mut self.channels {
             if channel.is_reliable() {
                 channel.acknowledge_message(header.ack);
-                for i in 0..32u16 {
+                for i in 0..crate::reliability::ACK_BITS_WINDOW {
                     if (header.ack_bits & (1 << i)) != 0 {
                         let acked_seq = header.ack.wrapping_sub(i + 1);
                         channel.acknowledge_message(acked_seq);

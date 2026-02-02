@@ -31,6 +31,7 @@ pub mod bit_io {
         bit_pos: usize,
         read_pos: usize,
         unpadded_length: usize,
+        measure_only: bool,
     }
 
     impl Default for BitBuffer {
@@ -46,7 +47,33 @@ pub mod bit_io {
                 bit_pos: 0,
                 read_pos: 0,
                 unpadded_length: 0,
+                measure_only: false,
             }
+        }
+
+        /// Create a measure-only buffer that tracks serialized size without allocation.
+        pub fn measure() -> Self {
+            BitBuffer {
+                buffer: Vec::new(),
+                bit_pos: 0,
+                read_pos: 0,
+                unpadded_length: 0,
+                measure_only: true,
+            }
+        }
+
+        /// Returns the serialized size in bits.
+        pub fn serialized_size_bits(&self) -> usize {
+            self.unpadded_length
+        }
+
+        /// Returns the serialized size in bytes (rounded up).
+        pub fn serialized_size_bytes(&self) -> usize {
+            self.unpadded_length.div_ceil(8)
+        }
+
+        pub fn is_measure_only(&self) -> bool {
+            self.measure_only
         }
 
         pub fn unpadded_length(&self) -> usize {
@@ -64,6 +91,7 @@ pub mod bit_io {
                 bit_pos: 0,
                 read_pos: 0,
                 unpadded_length: 0,
+                measure_only: false,
             }
         }
 
@@ -97,6 +125,12 @@ pub mod bit_io {
         }
 
         fn write_bytes_fast(&mut self, value: u64, bytes: usize) -> io::Result<()> {
+            if self.measure_only {
+                self.bit_pos += bytes * 8;
+                self.unpadded_length += bytes * 8;
+                return Ok(());
+            }
+
             self.buffer.reserve(bytes);
 
             for i in 0..bytes {
@@ -112,6 +146,12 @@ pub mod bit_io {
         }
 
         fn write_bits_optimized(&mut self, value: u64, bits: usize) -> io::Result<()> {
+            if self.measure_only {
+                self.bit_pos += bits;
+                self.unpadded_length += bits;
+                return Ok(());
+            }
+
             let mut remaining_bits = bits;
             let mut val = value;
 
@@ -221,6 +261,12 @@ pub mod bit_io {
 
     impl BitWrite for BitBuffer {
         fn write_bit(&mut self, bit: bool) -> io::Result<()> {
+            if self.measure_only {
+                self.bit_pos += 1;
+                self.unpadded_length += 1;
+                return Ok(());
+            }
+
             let byte_pos = self.bit_pos / 8;
             let bit_offset = self.bit_pos % 8;
 

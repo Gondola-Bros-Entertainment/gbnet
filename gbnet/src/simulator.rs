@@ -129,23 +129,8 @@ impl NetworkSimulator {
     }
 }
 
-/// Connection quality indicator.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ConnectionQuality {
-    Good,
-    Fair,
-    Poor,
-}
-
-pub fn assess_connection_quality(rtt_ms: f32, loss_percent: f32) -> ConnectionQuality {
-    if rtt_ms < 100.0 && loss_percent < 0.02 {
-        ConnectionQuality::Good
-    } else if rtt_ms < 250.0 && loss_percent < 0.1 {
-        ConnectionQuality::Fair
-    } else {
-        ConnectionQuality::Poor
-    }
-}
+// Re-export from stats for backward compatibility
+pub use crate::stats::{assess_connection_quality, ConnectionQuality};
 
 #[cfg(test)]
 mod tests {

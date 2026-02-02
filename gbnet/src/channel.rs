@@ -6,7 +6,7 @@
 use crate::config::{ChannelConfig, DeliveryMode};
 use crate::stats::ChannelStats;
 use crate::util::sequence_greater_than;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ pub struct Channel {
     // Receive state
     receive_sequence: u16,
     last_received_sequence: u16,
-    ordered_receive_buffer: BTreeMap<u16, (Vec<u8>, Instant)>,
+    ordered_receive_buffer: HashMap<u16, (Vec<u8>, Instant)>,
     delivery_queue: VecDeque<Vec<u8>>,
 
     // Stats
@@ -63,6 +63,7 @@ pub struct Channel {
     messages_received: u64,
     bytes_sent: u64,
     bytes_received: u64,
+    gap_sequences_skipped: u64,
 }
 
 impl Channel {
@@ -75,12 +76,13 @@ impl Channel {
             pending_ack: HashMap::new(),
             receive_sequence: 0,
             last_received_sequence: 0,
-            ordered_receive_buffer: BTreeMap::new(),
+            ordered_receive_buffer: HashMap::new(),
             delivery_queue: VecDeque::new(),
             messages_sent: 0,
             messages_received: 0,
             bytes_sent: 0,
             bytes_received: 0,
+            gap_sequences_skipped: 0,
         }
     }
 
@@ -237,8 +239,8 @@ impl Channel {
                 } else if sequence_greater_than(seq, self.receive_sequence) {
                     // Out of order - buffer it (enforce max size)
                     if self.ordered_receive_buffer.len() >= self.config.max_ordered_buffer_size {
-                        // Buffer full — skip the gap and deliver what we have
-                        self.flush_ordered_buffer();
+                        // Buffer full — evict the oldest entry to make room
+                        self.evict_oldest_buffered();
                     }
                     self.ordered_receive_buffer
                         .insert(seq, (data, Instant::now()));
@@ -255,6 +257,35 @@ impl Channel {
                     self.messages_received += 1;
                 }
                 // Stale messages are still ACKed (handled by reliability layer) but not delivered
+            }
+        }
+    }
+
+    /// Evict the oldest entry (by insertion time) from the ordered receive buffer.
+    /// After eviction, if the evicted entry's sequence equals receive_sequence,
+    /// advance past it and deliver any contiguous messages at the front.
+    fn evict_oldest_buffered(&mut self) {
+        let oldest_seq = self
+            .ordered_receive_buffer
+            .iter()
+            .min_by_key(|(_, (_, t))| *t)
+            .map(|(&seq, _)| seq);
+
+        if let Some(evicted_seq) = oldest_seq {
+            self.ordered_receive_buffer.remove(&evicted_seq);
+            self.gap_sequences_skipped += 1;
+
+            // If the evicted entry was what we were waiting for, advance
+            if evicted_seq == self.receive_sequence {
+                self.receive_sequence = self.receive_sequence.wrapping_add(1);
+                // Deliver any now-contiguous messages
+                while let Some((buffered, _)) =
+                    self.ordered_receive_buffer.remove(&self.receive_sequence)
+                {
+                    self.delivery_queue.push_back(buffered);
+                    self.messages_received += 1;
+                    self.receive_sequence = self.receive_sequence.wrapping_add(1);
+                }
             }
         }
     }
@@ -286,9 +317,27 @@ impl Channel {
         }
     }
 
+    /// Find the earliest buffered sequence in circular space.
+    fn find_earliest_buffered(&self) -> Option<u16> {
+        self.ordered_receive_buffer.keys().copied().reduce(|a, b| {
+            if sequence_greater_than(a, b) {
+                b
+            } else {
+                a
+            }
+        })
+    }
+
     /// Skip the gap in ordered delivery and flush all buffered messages in sequence order.
     fn flush_ordered_buffer(&mut self) {
-        if let Some(&first_seq) = self.ordered_receive_buffer.keys().next() {
+        if let Some(first_seq) = self.find_earliest_buffered() {
+            // Count skipped gap sequences
+            let mut seq = self.receive_sequence;
+            while seq != first_seq {
+                self.gap_sequences_skipped += 1;
+                seq = seq.wrapping_add(1);
+            }
+
             // Advance receive_sequence past the gap to the first buffered message
             self.receive_sequence = first_seq;
 
@@ -314,6 +363,7 @@ impl Channel {
         self.messages_received = 0;
         self.bytes_sent = 0;
         self.bytes_received = 0;
+        self.gap_sequences_skipped = 0;
     }
 
     pub fn is_reliable(&self) -> bool {
@@ -328,6 +378,14 @@ impl Channel {
         self.id
     }
 
+    pub fn config_priority(&self) -> u8 {
+        self.config.priority
+    }
+
+    pub fn gap_sequences_skipped(&self) -> u64 {
+        self.gap_sequences_skipped
+    }
+
     pub fn stats(&self) -> ChannelStats {
         ChannelStats {
             id: self.id,
@@ -338,6 +396,7 @@ impl Channel {
             send_buffer_size: self.send_buffer.len(),
             pending_ack_count: self.pending_ack.len(),
             receive_buffer_size: self.ordered_receive_buffer.len(),
+            gap_sequences_skipped: self.gap_sequences_skipped,
         }
     }
 
@@ -493,6 +552,74 @@ mod tests {
 
         assert_eq!(ch.receive().unwrap(), b"msg0");
         assert_eq!(ch.receive().unwrap(), b"msg1");
+        assert!(ch.receive().is_none());
+    }
+
+    #[test]
+    fn test_ordered_wraparound_delivery() {
+        let mut config = ChannelConfig::reliable_ordered();
+        config.max_ordered_buffer_size = 16;
+        let mut ch = Channel::new(0, config);
+
+        // Set receive_sequence near wraparound
+        ch.receive_sequence = 65534;
+
+        // Receive messages around wraparound: 65535, 0, 1 (out of order, missing 65534)
+        ch.on_packet_received(make_wire(65535, b"msg65535"));
+        ch.on_packet_received(make_wire(0, b"msg0"));
+        ch.on_packet_received(make_wire(1, b"msg1"));
+
+        // Nothing delivered yet (waiting for 65534)
+        assert!(ch.receive().is_none());
+
+        // Now deliver 65534 - should flush all in order
+        ch.on_packet_received(make_wire(65534, b"msg65534"));
+        assert_eq!(ch.receive().unwrap(), b"msg65534");
+        assert_eq!(ch.receive().unwrap(), b"msg65535");
+        assert_eq!(ch.receive().unwrap(), b"msg0");
+        assert_eq!(ch.receive().unwrap(), b"msg1");
+        assert!(ch.receive().is_none());
+    }
+
+    #[test]
+    fn test_ordered_buffer_full_eviction() {
+        let mut config = ChannelConfig::reliable_ordered();
+        config.max_ordered_buffer_size = 3;
+        let mut ch = Channel::new(0, config);
+
+        // Buffer messages 1, 2, 3 (waiting for 0)
+        ch.on_packet_received(make_wire(1, b"msg1"));
+        ch.on_packet_received(make_wire(2, b"msg2"));
+        ch.on_packet_received(make_wire(3, b"msg3"));
+        assert_eq!(ch.ordered_receive_buffer.len(), 3);
+
+        // Buffer full, receiving msg 4 should evict oldest
+        ch.on_packet_received(make_wire(4, b"msg4"));
+        // Should have evicted one entry, buffer still at max
+        assert!(ch.ordered_receive_buffer.len() <= 3);
+        assert!(ch.gap_sequences_skipped > 0);
+    }
+
+    #[test]
+    fn test_flush_ordered_buffer_wraparound() {
+        let mut config = ChannelConfig::reliable_ordered();
+        config.ordered_buffer_timeout = std::time::Duration::from_millis(1);
+        let mut ch = Channel::new(0, config);
+
+        // Set receive_sequence near wraparound
+        ch.receive_sequence = 65534;
+
+        // Buffer 65535 and 0 (skipping 65534)
+        ch.on_packet_received(make_wire(65535, b"a"));
+        ch.on_packet_received(make_wire(0, b"b"));
+
+        // Wait for timeout and flush
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ch.update();
+
+        // Should have flushed from 65535 (earliest in circular space)
+        assert_eq!(ch.receive().unwrap(), b"a");
+        assert_eq!(ch.receive().unwrap(), b"b");
         assert!(ch.receive().is_none());
     }
 }

@@ -1,6 +1,7 @@
 // reliability.rs - Reliable packet delivery with Jacobson/Karels RTT estimation
 use crate::stats::ReliabilityStats;
 use crate::util::{sequence_diff, sequence_greater_than};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,7 @@ pub struct ReliableEndpoint {
 
     max_sequence_distance: u16,
     max_retries: u32,
+    max_in_flight: usize,
 
     // Jacobson/Karels RTT estimation
     srtt: f64,
@@ -47,6 +49,7 @@ pub struct ReliableEndpoint {
     total_packets_sent: u64,
     total_packets_acked: u64,
     total_packets_lost: u64,
+    packets_evicted: u64,
     bytes_sent: u64,
     bytes_acked: u64,
 }
@@ -69,6 +72,7 @@ impl ReliableEndpoint {
             received_packets: SequenceBuffer::new(buffer_size),
             max_sequence_distance: crate::config::DEFAULT_MAX_SEQUENCE_DISTANCE,
             max_retries: crate::config::DEFAULT_MAX_RELIABLE_RETRIES,
+            max_in_flight: crate::config::DEFAULT_MAX_IN_FLIGHT,
             srtt: 0.0,
             rttvar: 0.0,
             rto: Duration::from_millis(INITIAL_RTO_MILLIS),
@@ -80,9 +84,15 @@ impl ReliableEndpoint {
             total_packets_sent: 0,
             total_packets_acked: 0,
             total_packets_lost: 0,
+            packets_evicted: 0,
             bytes_sent: 0,
             bytes_acked: 0,
         }
+    }
+
+    pub fn with_max_in_flight(mut self, max: usize) -> Self {
+        self.max_in_flight = max;
+        self
     }
 
     /// Gets the next sequence number for outgoing packets.
@@ -95,6 +105,12 @@ impl ReliableEndpoint {
     /// Records a packet as sent for reliability tracking.
     pub fn on_packet_sent(&mut self, sequence: u16, send_time: Instant, data: Vec<u8>) {
         let size = data.len();
+
+        // Evict if at capacity
+        if self.sent_packets.len() >= self.max_in_flight {
+            self.evict_worst_in_flight();
+        }
+
         self.sent_packets.insert(
             sequence,
             SentPacketData {
@@ -106,6 +122,26 @@ impl ReliableEndpoint {
         );
         self.total_packets_sent += 1;
         self.bytes_sent += size as u64;
+    }
+
+    /// Evict the in-flight packet with the highest retry count (tiebreak: oldest send_time).
+    fn evict_worst_in_flight(&mut self) {
+        let worst_seq = self
+            .sent_packets
+            .iter()
+            .max_by(|(_, a), (_, b)| {
+                a.retry_count
+                    .cmp(&b.retry_count)
+                    .then_with(|| b.send_time.cmp(&a.send_time))
+            })
+            .map(|(&seq, _)| seq);
+
+        if let Some(seq) = worst_seq {
+            self.sent_packets.remove(&seq);
+            self.record_loss_sample(true);
+            self.total_packets_lost += 1;
+            self.packets_evicted += 1;
+        }
     }
 
     /// Processes an incoming packet and updates ack information.
@@ -189,8 +225,8 @@ impl ReliableEndpoint {
     }
 
     /// Updates the reliability system. Returns packets needing retransmission.
-    pub fn update(&mut self, current_time: Instant) -> Vec<(u16, Vec<u8>)> {
-        let mut packets_to_resend = Vec::new();
+    pub fn update(&mut self, current_time: Instant) -> SmallVec<[(u16, Vec<u8>); 8]> {
+        let mut packets_to_resend: SmallVec<[(u16, Vec<u8>); 8]> = SmallVec::new();
         let mut packets_to_remove = Vec::new();
 
         for (&sequence, packet_data) in &mut self.sent_packets {
@@ -263,6 +299,10 @@ impl ReliableEndpoint {
         self.sent_packets.len()
     }
 
+    pub fn packets_evicted(&self) -> u64 {
+        self.packets_evicted
+    }
+
     pub fn stats(&self) -> ReliabilityStats {
         ReliabilityStats {
             packets_in_flight: self.sent_packets.len(),
@@ -275,6 +315,7 @@ impl ReliableEndpoint {
             total_sent: self.total_packets_sent,
             total_acked: self.total_packets_acked,
             total_lost: self.total_packets_lost,
+            packets_evicted: self.packets_evicted,
         }
     }
 }
@@ -466,5 +507,44 @@ mod tests {
         assert!(buffer.exists(65535));
         assert!(buffer.exists(0));
         assert!(buffer.exists(1));
+    }
+
+    #[test]
+    fn test_in_flight_cap_eviction() {
+        let mut endpoint = ReliableEndpoint::new(256).with_max_in_flight(4);
+        let now = Instant::now();
+
+        // Send 4 packets (at capacity)
+        for i in 0..4 {
+            endpoint.on_packet_sent(i, now, vec![i as u8]);
+        }
+        assert_eq!(endpoint.packets_in_flight(), 4);
+
+        // Send a 5th — should evict one
+        endpoint.on_packet_sent(4, now, vec![4]);
+        assert_eq!(endpoint.packets_in_flight(), 4);
+        assert_eq!(endpoint.packets_evicted(), 1);
+    }
+
+    #[test]
+    fn test_in_flight_evicts_highest_retry() {
+        let mut endpoint = ReliableEndpoint::new(256).with_max_in_flight(3);
+        let now = Instant::now();
+
+        endpoint.on_packet_sent(0, now, vec![0]);
+        endpoint.on_packet_sent(1, now, vec![1]);
+        endpoint.on_packet_sent(2, now, vec![2]);
+
+        // Simulate retries on seq 1 by updating past RTO multiple times
+        let t1 = now + endpoint.rto() + Duration::from_millis(1);
+        let _ = endpoint.update(t1);
+        // seq 0,1,2 all got retried once. Now retry again past 2x RTO
+        let t2 = t1 + endpoint.rto() * 2 + Duration::from_millis(1);
+        let _ = endpoint.update(t2);
+
+        // Now send a 4th packet — should evict the one with highest retry
+        endpoint.on_packet_sent(3, now + Duration::from_secs(1), vec![3]);
+        assert_eq!(endpoint.packets_in_flight(), 3);
+        assert_eq!(endpoint.packets_evicted(), 1);
     }
 }

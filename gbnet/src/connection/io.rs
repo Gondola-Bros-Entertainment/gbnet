@@ -58,6 +58,9 @@ impl Connection {
                 self.congestion
                     .update(self.stats.packet_loss, self.stats.rtt);
 
+                // Refill byte budget at tick start
+                self.congestion.refill_budget(self.config.mtu);
+
                 // Send keepalive if needed
                 let time_since_send = now.duration_since(self.last_packet_send_time);
                 if time_since_send > self.config.keepalive_interval {
@@ -81,10 +84,16 @@ impl Connection {
                 // Track packets sent this cycle for congestion limiting
                 let mut packets_sent_this_cycle: u32 = 0;
 
-                // Drain channel outgoing messages into packets
-                for ch_idx in 0..self.channels.len() {
+                // Drain channel outgoing messages in priority order
+                let priority_order = self.channel_priority_order.clone();
+                for &ch_idx in &priority_order {
                     loop {
-                        if !self.congestion.can_send(packets_sent_this_cycle) {
+                        // Estimate packet size for budget check (header + typical overhead)
+                        let estimated_size = self.config.mtu;
+                        if !self
+                            .congestion
+                            .can_send(packets_sent_this_cycle, estimated_size)
+                        {
                             break;
                         }
                         let Some((msg_seq, wire_data)) =
@@ -92,7 +101,9 @@ impl Connection {
                         else {
                             break;
                         };
+                        let packet_size = wire_data.len();
                         packets_sent_this_cycle += 1;
+                        self.congestion.deduct_budget(packet_size);
                         let header = self.create_header();
                         let packet = Packet::new(
                             header,
@@ -176,6 +187,11 @@ impl Connection {
         self.stats.packet_loss = self.reliability.packet_loss_percent();
         self.stats.bandwidth_up = self.bandwidth_up.bytes_per_second() as f32;
         self.stats.bandwidth_down = self.bandwidth_down.bytes_per_second() as f32;
+        const LOSS_RATIO_TO_PERCENT: f32 = 100.0;
+        self.stats.connection_quality = crate::stats::assess_connection_quality(
+            self.stats.rtt,
+            self.stats.packet_loss * LOSS_RATIO_TO_PERCENT,
+        );
 
         Ok(())
     }

@@ -39,6 +39,9 @@ pub const DEFAULT_MAX_PENDING: usize = 256;
 pub const DEFAULT_ORDERED_BUFFER_TIMEOUT_SECS: u64 = 5;
 pub const DEFAULT_MAX_ORDERED_BUFFER_SIZE: usize = 1024;
 pub const DEFAULT_RATE_LIMIT_PER_SECOND: usize = 10;
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
+pub const DEFAULT_MAX_TRACKED_TOKENS: usize = 4096;
+pub const DEFAULT_CHANNEL_PRIORITY: u8 = 128;
 
 /// Maximum exponential backoff exponent for retransmission (caps at 2^5 = 32x RTO).
 pub const MAX_BACKOFF_EXPONENT: u32 = 5;
@@ -95,6 +98,13 @@ pub enum ConfigError {
     InvalidMtu,
     TimeoutNotGreaterThanKeepalive,
     InvalidMaxClients,
+    ChannelConfigsExceedMaxChannels,
+    InvalidSendRate,
+    InvalidMaxPacketRate,
+    InvalidMaxInFlight,
+    InvalidFragmentThreshold,
+    SendRateExceedsMaxPacketRate,
+    InvalidCongestionThreshold,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -117,6 +127,27 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidMaxClients => {
                 write!(f, "max_clients must be > 0")
+            }
+            ConfigError::ChannelConfigsExceedMaxChannels => {
+                write!(f, "channel_configs.len() must be <= max_channels")
+            }
+            ConfigError::InvalidSendRate => {
+                write!(f, "send_rate must be > 0.0 and not NaN")
+            }
+            ConfigError::InvalidMaxPacketRate => {
+                write!(f, "max_packet_rate must be > 0.0 and not NaN")
+            }
+            ConfigError::InvalidMaxInFlight => {
+                write!(f, "max_in_flight must be > 0")
+            }
+            ConfigError::InvalidFragmentThreshold => {
+                write!(f, "fragment_threshold must be > 0")
+            }
+            ConfigError::SendRateExceedsMaxPacketRate => {
+                write!(f, "send_rate must be <= max_packet_rate")
+            }
+            ConfigError::InvalidCongestionThreshold => {
+                write!(f, "congestion thresholds must be finite and not NaN")
             }
         }
     }
@@ -150,6 +181,7 @@ pub struct NetworkConfig {
     pub max_sequence_distance: u16,
     pub reliable_retry_time: Duration,
     pub max_reliable_retries: u32,
+    pub max_in_flight: usize,
 
     // Channels
     pub max_channels: usize,
@@ -164,6 +196,7 @@ pub struct NetworkConfig {
     // Security
     pub encryption: bool,
     pub encryption_key: Option<[u8; 32]>,
+    pub max_tracked_tokens: usize,
 
     // Congestion
     pub congestion_good_rtt_threshold: f32,
@@ -187,6 +220,14 @@ pub struct NetworkConfig {
     pub rate_limit_per_second: usize,
 }
 
+fn is_valid_positive_f32(v: f32) -> bool {
+    v > 0.0 && !v.is_nan()
+}
+
+fn is_finite_f32(v: f32) -> bool {
+    v.is_finite()
+}
+
 impl NetworkConfig {
     /// Validates the configuration, returning an error if any values are invalid.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -207,6 +248,30 @@ impl NetworkConfig {
         }
         if self.max_clients == 0 {
             return Err(ConfigError::InvalidMaxClients);
+        }
+        if self.channel_configs.len() > self.max_channels {
+            return Err(ConfigError::ChannelConfigsExceedMaxChannels);
+        }
+        if !is_valid_positive_f32(self.send_rate) {
+            return Err(ConfigError::InvalidSendRate);
+        }
+        if !is_valid_positive_f32(self.max_packet_rate) {
+            return Err(ConfigError::InvalidMaxPacketRate);
+        }
+        if self.max_in_flight == 0 {
+            return Err(ConfigError::InvalidMaxInFlight);
+        }
+        if self.fragment_threshold == 0 {
+            return Err(ConfigError::InvalidFragmentThreshold);
+        }
+        if self.send_rate > self.max_packet_rate {
+            return Err(ConfigError::SendRateExceedsMaxPacketRate);
+        }
+        if !is_finite_f32(self.congestion_good_rtt_threshold)
+            || !is_finite_f32(self.congestion_bad_loss_threshold)
+            || !is_finite_f32(self.congestion_threshold)
+        {
+            return Err(ConfigError::InvalidCongestionThreshold);
         }
         Ok(())
     }
@@ -258,6 +323,10 @@ impl NetworkConfig {
         self.rate_limit_per_second = per_second;
         self
     }
+    pub fn with_max_in_flight(mut self, max: usize) -> Self {
+        self.max_in_flight = max;
+        self
+    }
 }
 
 impl Default for NetworkConfig {
@@ -284,6 +353,7 @@ impl Default for NetworkConfig {
             max_sequence_distance: DEFAULT_MAX_SEQUENCE_DISTANCE,
             reliable_retry_time: Duration::from_millis(DEFAULT_RELIABLE_RETRY_TIME_MILLIS),
             max_reliable_retries: DEFAULT_MAX_RELIABLE_RETRIES,
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
 
             max_channels: DEFAULT_MAX_CHANNELS,
             default_channel_config: ChannelConfig::default(),
@@ -295,6 +365,7 @@ impl Default for NetworkConfig {
 
             encryption: false,
             encryption_key: None,
+            max_tracked_tokens: DEFAULT_MAX_TRACKED_TOKENS,
 
             congestion_good_rtt_threshold: DEFAULT_CONGESTION_GOOD_RTT_THRESHOLD_MS,
             congestion_bad_loss_threshold: DEFAULT_CONGESTION_BAD_LOSS_THRESHOLD,
@@ -326,6 +397,7 @@ pub struct ChannelConfig {
     pub ordered_buffer_timeout: Duration,
     pub max_ordered_buffer_size: usize,
     pub max_reliable_retries: u32,
+    pub priority: u8,
 }
 
 impl Default for ChannelConfig {
@@ -338,6 +410,7 @@ impl Default for ChannelConfig {
             ordered_buffer_timeout: Duration::from_secs(DEFAULT_ORDERED_BUFFER_TIMEOUT_SECS),
             max_ordered_buffer_size: DEFAULT_MAX_ORDERED_BUFFER_SIZE,
             max_reliable_retries: DEFAULT_MAX_RELIABLE_RETRIES,
+            priority: DEFAULT_CHANNEL_PRIORITY,
         }
     }
 }
@@ -376,6 +449,11 @@ impl ChannelConfig {
             delivery_mode: DeliveryMode::ReliableSequenced,
             ..Default::default()
         }
+    }
+
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
     }
 }
 

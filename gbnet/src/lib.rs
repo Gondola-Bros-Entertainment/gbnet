@@ -73,9 +73,12 @@ pub use packet::{Packet, PacketHeader, PacketType};
 pub use reliability::{ReliableEndpoint, SequenceBuffer};
 pub use security::{crc32c, ConnectToken, ConnectionRateLimiter, TokenValidator};
 pub use server::{NetServer, ServerEvent};
-pub use simulator::{ConnectionQuality, NetworkSimulator};
+pub use simulator::NetworkSimulator;
 pub use socket::{SocketError, UdpSocket};
-pub use stats::{ChannelStats, NetworkStats, ReliabilityStats, SocketStats};
+pub use stats::{
+    assess_connection_quality, ChannelStats, ConnectionQuality, NetworkStats, ReliabilityStats,
+    SocketStats,
+};
 pub use util::{sequence_diff, sequence_greater_than};
 
 pub use gbnet_macros::NetworkSerialize;
@@ -139,8 +142,8 @@ impl From<std::io::Error> for NetError {
 pub mod prelude {
     pub use crate::{
         BitBuffer, BitDeserialize, BitRead, BitSerialize, BitWrite, ChannelConfig, ClientEvent,
-        Connection, ConnectionError, ConnectionState, DeliveryMode, DisconnectReason, NetClient,
-        NetError, NetServer, NetworkConfig, NetworkSerialize, NetworkStats, ServerEvent,
-        SocketAddr,
+        Connection, ConnectionError, ConnectionQuality, ConnectionState, DeliveryMode,
+        DisconnectReason, NetClient, NetError, NetServer, NetworkConfig, NetworkSerialize,
+        NetworkStats, ServerEvent, SocketAddr,
     };
 }

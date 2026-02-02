@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::config::DEFAULT_MAX_TRACKED_TOKENS;
+
 /// CRC-32C (Castagnoli) polynomial used for packet integrity (iSCSI standard).
 const CRC32C_POLYNOMIAL: u32 = 0x82F63B78;
 
@@ -94,6 +96,8 @@ impl ConnectToken {
 pub struct TokenValidator {
     used_tokens: HashMap<u64, Instant>,
     token_lifetime: Duration,
+    max_tracked_tokens: usize,
+    tokens_evicted: u64,
 }
 
 impl TokenValidator {
@@ -101,7 +105,14 @@ impl TokenValidator {
         Self {
             used_tokens: HashMap::new(),
             token_lifetime,
+            max_tracked_tokens: DEFAULT_MAX_TRACKED_TOKENS,
+            tokens_evicted: 0,
         }
+    }
+
+    pub fn with_max_tracked_tokens(mut self, max: usize) -> Self {
+        self.max_tracked_tokens = max;
+        self
     }
 
     /// Validate a connect token. Returns client_id if valid.
@@ -118,8 +129,26 @@ impl TokenValidator {
         // Mark as used
         self.used_tokens.insert(token.client_id, Instant::now());
 
-        // Cleanup old entries
-        self.cleanup();
+        // Enforce bounded size
+        if self.used_tokens.len() > self.max_tracked_tokens {
+            // First try removing expired
+            self.cleanup();
+
+            // If still over limit, evict oldest entries
+            while self.used_tokens.len() > self.max_tracked_tokens {
+                let oldest_key = self
+                    .used_tokens
+                    .iter()
+                    .min_by_key(|(_, instant)| **instant)
+                    .map(|(&k, _)| k);
+                if let Some(key) = oldest_key {
+                    self.used_tokens.remove(&key);
+                    self.tokens_evicted += 1;
+                } else {
+                    break;
+                }
+            }
+        }
 
         Ok(token.client_id)
     }
@@ -128,6 +157,10 @@ impl TokenValidator {
         let lifetime = self.token_lifetime;
         self.used_tokens
             .retain(|_, created| created.elapsed() < lifetime);
+    }
+
+    pub fn tokens_evicted(&self) -> u64 {
+        self.tokens_evicted
     }
 }
 
@@ -423,5 +456,22 @@ mod tests {
         assert!(limiter.allow(addr));
         assert!(limiter.allow(addr));
         assert!(!limiter.allow(addr)); // 4th request blocked
+    }
+
+    #[test]
+    fn test_token_table_bounded() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
+        let mut validator =
+            TokenValidator::new(Duration::from_secs(60)).with_max_tracked_tokens(10);
+
+        // Insert more than max_tracked_tokens
+        for i in 0..20u64 {
+            let token = ConnectToken::new(i, vec![addr], 60, vec![]);
+            let _ = validator.validate(&token);
+        }
+
+        // Should be bounded
+        assert!(validator.used_tokens.len() <= 10);
+        assert!(validator.tokens_evicted() > 0);
     }
 }
