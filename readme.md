@@ -1,5 +1,5 @@
 <div align="center">
-GB-Net
+<h1>GB-Net</h1>
 <p><strong>High-Performance Game Networking for Rust</strong></p>
 <p>Bitpacked serialization. Reliable UDP transport. Built for real-time.</p>
 <p><a href="#quick-start">Quick Start</a> · <a href="#delivery-modes">Delivery Modes</a> · <a href="#serialization-attributes">Serialization</a> · <a href="#architecture">Architecture</a></p>
