@@ -94,8 +94,8 @@ fn test_reliable_endpoint_tracking() {
     let mut endpoint = ReliableEndpoint::new(256);
     let now = Instant::now();
 
-    endpoint.on_packet_sent(0, now, vec![1, 2, 3]);
-    endpoint.on_packet_sent(1, now, vec![4, 5, 6]);
+    endpoint.on_packet_sent(0, now, 0, 0, 3);
+    endpoint.on_packet_sent(1, now, 0, 1, 3);
 
     let stats = endpoint.stats();
     assert_eq!(stats.packets_in_flight, 2);

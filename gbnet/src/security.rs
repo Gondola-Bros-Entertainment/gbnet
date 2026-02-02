@@ -1,7 +1,7 @@
 //! CRC32C integrity, connect-token authentication, rate limiting, and optional AES-256-GCM encryption.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use crate::config::DEFAULT_MAX_TRACKED_TOKENS;
@@ -180,9 +180,10 @@ impl std::fmt::Display for TokenError {
 impl std::error::Error for TokenError {}
 
 /// Rate limiter for connection requests per source IP.
+/// Keys on IP address (not socket address) to prevent port-rotation bypass.
 #[derive(Debug)]
 pub struct ConnectionRateLimiter {
-    requests: HashMap<SocketAddr, Vec<Instant>>,
+    requests: HashMap<IpAddr, Vec<Instant>>,
     max_requests_per_second: usize,
     window: Duration,
 }
@@ -201,7 +202,7 @@ impl ConnectionRateLimiter {
         let now = Instant::now();
         let window = self.window;
 
-        let timestamps = self.requests.entry(addr).or_default();
+        let timestamps = self.requests.entry(addr.ip()).or_default();
         timestamps.retain(|t| now.duration_since(*t) < window);
 
         if timestamps.len() >= self.max_requests_per_second {
@@ -227,6 +228,7 @@ impl ConnectionRateLimiter {
 #[cfg(feature = "encryption")]
 pub struct EncryptionState {
     key: ring::aead::LessSafeKey,
+    connection_salt: u64,
 }
 
 #[cfg(feature = "encryption")]
@@ -242,7 +244,13 @@ impl EncryptionState {
             .map_err(|_| EncryptionError::InvalidKey)?;
         Ok(Self {
             key: ring::aead::LessSafeKey::new(unbound),
+            connection_salt: 0,
         })
+    }
+
+    /// Set the connection salt (should be `client_salt ^ server_salt` after handshake).
+    pub fn set_connection_salt(&mut self, salt: u64) {
+        self.connection_salt = salt;
     }
 
     /// Encrypt payload using AES-256-GCM with sequence-derived nonce.
@@ -283,6 +291,11 @@ impl EncryptionState {
     fn make_nonce(&self, sequence: u64) -> [u8; AES_GCM_NONCE_LEN] {
         let mut nonce = [0u8; AES_GCM_NONCE_LEN];
         nonce[..8].copy_from_slice(&sequence.to_le_bytes());
+        let salt_bytes = self.connection_salt.to_le_bytes();
+        // Mix connection salt into nonce bytes 8..12 to differentiate connections
+        for i in 0..4 {
+            nonce[8 + i] = salt_bytes[i];
+        }
         nonce
     }
 }

@@ -94,18 +94,47 @@ impl Connection {
                         packets_sent_this_cycle += 1;
                         self.congestion.deduct_budget(packet_size);
                         let header = self.create_header();
-                        let packet = Packet::new(
-                            header,
-                            PacketType::Payload {
-                                channel: ch_idx as u8,
-                                is_fragment: false,
-                            },
-                        )
-                        .with_payload(wire_data.clone());
-                        self.send_queue.push_back(packet);
+                        let pkt_seq = header.sequence;
+
+                        if wire_data.len() > self.config.fragment_threshold {
+                            if let Ok(fragments) = crate::fragment::fragment_message(
+                                msg_seq,
+                                &wire_data,
+                                self.config.fragment_threshold,
+                            ) {
+                                for frag_data in fragments {
+                                    let frag_header = self.create_header();
+                                    let packet = Packet::new(
+                                        frag_header,
+                                        PacketType::Payload {
+                                            channel: ch_idx as u8,
+                                            is_fragment: true,
+                                        },
+                                    )
+                                    .with_payload(frag_data);
+                                    self.send_queue.push_back(packet);
+                                }
+                            }
+                        } else {
+                            let packet = Packet::new(
+                                header,
+                                PacketType::Payload {
+                                    channel: ch_idx as u8,
+                                    is_fragment: false,
+                                },
+                            )
+                            .with_payload(wire_data.clone());
+                            self.send_queue.push_back(packet);
+                        }
 
                         if self.channels[ch_idx].is_reliable() {
-                            self.reliability.on_packet_sent(msg_seq, now, wire_data);
+                            self.reliability.on_packet_sent(
+                                pkt_seq,
+                                now,
+                                ch_idx as u8,
+                                msg_seq,
+                                packet_size,
+                            );
                         }
                     }
 
@@ -129,20 +158,7 @@ impl Connection {
                     channel.update();
                 }
 
-                let packets_to_retry = self.reliability.update(now);
-                for (sequence, data) in packets_to_retry {
-                    let mut header = self.create_header();
-                    header.sequence = sequence;
-                    let packet = Packet::new(
-                        header,
-                        PacketType::Payload {
-                            channel: 0,
-                            is_fragment: false,
-                        },
-                    )
-                    .with_payload(data);
-                    self.send_queue.push_back(packet);
-                }
+                self.mtu_discovery.check_probe_timeout();
             }
             ConnectionState::Disconnecting => {
                 if let Some(disc_time) = self.disconnect_time {
@@ -209,7 +225,6 @@ impl Connection {
 
             self.bandwidth_up.record(data_with_crc.len());
             self.last_packet_send_time = Instant::now();
-            self.local_sequence = self.local_sequence.wrapping_add(1);
             self.stats.packets_sent += 1;
             self.stats.bytes_sent += data_with_crc.len() as u64;
         }

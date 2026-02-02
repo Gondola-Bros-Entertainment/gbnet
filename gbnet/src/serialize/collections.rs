@@ -6,6 +6,10 @@ use std::io::{self, Read, Write};
 use super::bit_io;
 use super::{BitDeserialize, BitSerialize, ByteAlignedDeserialize, ByteAlignedSerialize};
 
+/// Maximum length allowed when deserializing variable-length collections to prevent
+/// allocation-based denial of service from malicious packets.
+const MAX_DESERIALIZE_LENGTH: usize = 1_048_576;
+
 impl BitSerialize for String {
     fn bit_serialize<W: bit_io::BitWrite>(&self, writer: &mut W) -> io::Result<()> {
         const DEFAULT_MAX_LEN: usize = 65535; // 16 bits for length
@@ -63,6 +67,12 @@ impl ByteAlignedSerialize for String {
 impl ByteAlignedDeserialize for String {
     fn byte_aligned_deserialize<R: Read + ReadBytesExt>(reader: &mut R) -> io::Result<Self> {
         let len = reader.read_u32::<LittleEndian>()? as usize;
+        if len > MAX_DESERIALIZE_LENGTH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("String length {} exceeds max {}", len, MAX_DESERIALIZE_LENGTH),
+            ));
+        }
         let mut bytes = vec![0u8; len];
         reader.read_exact(&mut bytes)?;
 
@@ -309,6 +319,12 @@ impl<T: ByteAlignedSerialize> ByteAlignedSerialize for Vec<T> {
 impl<T: ByteAlignedDeserialize> ByteAlignedDeserialize for Vec<T> {
     fn byte_aligned_deserialize<R: Read + ReadBytesExt>(reader: &mut R) -> io::Result<Self> {
         let len = reader.read_u32::<LittleEndian>()? as usize;
+        if len > MAX_DESERIALIZE_LENGTH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Vec length {} exceeds max {}", len, MAX_DESERIALIZE_LENGTH),
+            ));
+        }
         debug!("Deserialized Vec<T> length: {}", len);
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {

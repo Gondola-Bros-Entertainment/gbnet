@@ -6,14 +6,13 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+
 pub const INITIAL_RTO_MILLIS: u64 = 100;
 pub const ACK_BITS_WINDOW: u16 = 32;
-pub const FAST_RETRANSMIT_THRESHOLD: u32 = 3;
 pub const RTT_ALPHA: f64 = 0.125;
 pub const RTT_BETA: f64 = 0.25;
 pub const MIN_RTO_MS: f64 = 50.0;
 pub const MAX_RTO_MS: f64 = 2000.0;
-use crate::config::MAX_BACKOFF_EXPONENT;
 const LOSS_WINDOW_SIZE: usize = 256;
 
 /// Tracks sent packets for reliability and acknowledgment.
@@ -23,11 +22,10 @@ pub struct ReliableEndpoint {
     remote_sequence: u16,
     ack_bits: u32,
 
-    sent_packets: HashMap<u16, SentPacketData>,
+    sent_packets: HashMap<u16, SentPacketRecord>,
     received_packets: SequenceBuffer<bool>,
 
     max_sequence_distance: u16,
-    max_retries: u32,
     max_in_flight: usize,
 
     srtt: f64,
@@ -39,8 +37,6 @@ pub struct ReliableEndpoint {
     loss_window_index: usize,
     loss_window_count: usize,
 
-    dup_ack_counts: HashMap<u16, u32>,
-
     total_packets_sent: u64,
     total_packets_acked: u64,
     total_packets_lost: u64,
@@ -50,10 +46,10 @@ pub struct ReliableEndpoint {
 }
 
 #[derive(Debug, Clone)]
-struct SentPacketData {
+struct SentPacketRecord {
+    channel_id: u8,
+    channel_sequence: u16,
     send_time: Instant,
-    retry_count: u32,
-    data: Vec<u8>,
     size: usize,
 }
 
@@ -66,7 +62,6 @@ impl ReliableEndpoint {
             sent_packets: HashMap::new(),
             received_packets: SequenceBuffer::new(buffer_size),
             max_sequence_distance: crate::config::DEFAULT_MAX_SEQUENCE_DISTANCE,
-            max_retries: crate::config::DEFAULT_MAX_RELIABLE_RETRIES,
             max_in_flight: crate::config::DEFAULT_MAX_IN_FLIGHT,
             srtt: 0.0,
             rttvar: 0.0,
@@ -75,7 +70,6 @@ impl ReliableEndpoint {
             loss_window: [false; LOSS_WINDOW_SIZE],
             loss_window_index: 0,
             loss_window_count: 0,
-            dup_ack_counts: HashMap::new(),
             total_packets_sent: 0,
             total_packets_acked: 0,
             total_packets_lost: 0,
@@ -98,19 +92,24 @@ impl ReliableEndpoint {
     }
 
     /// Records a packet as sent for reliability tracking.
-    pub fn on_packet_sent(&mut self, sequence: u16, send_time: Instant, data: Vec<u8>) {
-        let size = data.len();
-
+    pub fn on_packet_sent(
+        &mut self,
+        sequence: u16,
+        send_time: Instant,
+        channel_id: u8,
+        channel_sequence: u16,
+        size: usize,
+    ) {
         if self.sent_packets.len() >= self.max_in_flight {
             self.evict_worst_in_flight();
         }
 
         self.sent_packets.insert(
             sequence,
-            SentPacketData {
+            SentPacketRecord {
+                channel_id,
+                channel_sequence,
                 send_time,
-                retry_count: 0,
-                data,
                 size,
             },
         );
@@ -118,16 +117,12 @@ impl ReliableEndpoint {
         self.bytes_sent += size as u64;
     }
 
-    /// Evict the in-flight packet with the highest retry count (tiebreak: oldest send_time).
+    /// Evict the in-flight packet with the oldest send_time.
     fn evict_worst_in_flight(&mut self) {
         let worst_seq = self
             .sent_packets
             .iter()
-            .max_by(|(_, a), (_, b)| {
-                a.retry_count
-                    .cmp(&b.retry_count)
-                    .then_with(|| b.send_time.cmp(&a.send_time))
-            })
+            .min_by_key(|(_, record)| record.send_time)
             .map(|(&seq, _)| seq);
 
         if let Some(seq) = worst_seq {
@@ -151,9 +146,9 @@ impl ReliableEndpoint {
             if sequence_greater_than(sequence, self.remote_sequence) {
                 let diff = sequence_diff(sequence, self.remote_sequence) as u32;
                 if diff <= ACK_BITS_WINDOW as u32 {
-                    self.ack_bits = (self.ack_bits << diff) | 1;
+                    self.ack_bits = (self.ack_bits << diff) | (1 << (diff - 1));
                 } else {
-                    self.ack_bits = 1;
+                    self.ack_bits = 0;
                 }
                 self.remote_sequence = sequence;
             } else {
@@ -166,33 +161,40 @@ impl ReliableEndpoint {
     }
 
     /// Processes acknowledgments from the remote endpoint.
-    pub fn process_acks(&mut self, ack: u16, ack_bits: u32) {
-        self.ack_single(ack);
+    /// Returns a list of (channel_id, channel_sequence) pairs for acked packets.
+    pub fn process_acks(&mut self, ack: u16, ack_bits: u32) -> SmallVec<[(u8, u16); 8]> {
+        let mut acked = SmallVec::new();
+
+        if let Some(pair) = self.ack_single(ack) {
+            acked.push(pair);
+        }
 
         for i in 0..ACK_BITS_WINDOW {
             if (ack_bits & (1 << i)) != 0 {
                 let acked_seq = ack.wrapping_sub(i + 1);
-                self.ack_single(acked_seq);
+                if let Some(pair) = self.ack_single(acked_seq) {
+                    acked.push(pair);
+                }
             }
         }
+
+        acked
     }
 
-    fn ack_single(&mut self, sequence: u16) {
-        if let Some(packet_data) = self.sent_packets.remove(&sequence) {
-            let rtt_sample = packet_data.send_time.elapsed().as_secs_f64() * 1000.0;
-
-            // Karn's algorithm: skip RTT samples from retransmitted packets
-            if packet_data.retry_count == 0 {
-                self.update_rtt(rtt_sample);
-            }
+    fn ack_single(&mut self, sequence: u16) -> Option<(u8, u16)> {
+        if let Some(record) = self.sent_packets.remove(&sequence) {
+            let rtt_sample = record.send_time.elapsed().as_secs_f64() * 1000.0;
+            self.update_rtt(rtt_sample);
 
             self.total_packets_acked += 1;
-            self.bytes_acked += packet_data.size as u64;
+            self.bytes_acked += record.size as u64;
 
             self.record_loss_sample(false);
-        }
 
-        self.dup_ack_counts.remove(&sequence);
+            Some((record.channel_id, record.channel_sequence))
+        } else {
+            None
+        }
     }
 
     /// Update RTT using Jacobson/Karels algorithm.
@@ -215,49 +217,6 @@ impl ReliableEndpoint {
         if self.loss_window_count < LOSS_WINDOW_SIZE {
             self.loss_window_count += 1;
         }
-    }
-
-    /// Updates the reliability system. Returns packets needing retransmission.
-    pub fn update(&mut self, current_time: Instant) -> SmallVec<[(u16, Vec<u8>); 8]> {
-        let mut packets_to_resend: SmallVec<[(u16, Vec<u8>); 8]> = SmallVec::new();
-        let mut packets_to_remove = Vec::new();
-
-        for (&sequence, packet_data) in &mut self.sent_packets {
-            let elapsed = current_time.duration_since(packet_data.send_time);
-            let backoff_rto =
-                self.rto * (1u32 << packet_data.retry_count.min(MAX_BACKOFF_EXPONENT));
-            if elapsed >= backoff_rto {
-                if packet_data.retry_count >= self.max_retries {
-                    packets_to_remove.push(sequence);
-                } else {
-                    packet_data.retry_count += 1;
-                    packet_data.send_time = current_time;
-                    packets_to_resend.push((sequence, packet_data.data.clone()));
-                }
-            }
-        }
-
-        for sequence in packets_to_remove {
-            self.sent_packets.remove(&sequence);
-            self.total_packets_lost += 1;
-            self.record_loss_sample(true);
-        }
-
-        packets_to_resend
-    }
-
-    /// Trigger fast retransmit for a sequence (on 3 duplicate ACKs).
-    pub fn on_duplicate_ack(&mut self, sequence: u16) -> Option<(u16, Vec<u8>)> {
-        let count = self.dup_ack_counts.entry(sequence).or_insert(0);
-        *count += 1;
-        if *count == FAST_RETRANSMIT_THRESHOLD {
-            if let Some(packet_data) = self.sent_packets.get_mut(&sequence) {
-                packet_data.send_time = Instant::now();
-                packet_data.retry_count += 1;
-                return Some((sequence, packet_data.data.clone()));
-            }
-        }
-        None
     }
 
     /// Gets current ack information to include in outgoing packets.
@@ -315,7 +274,7 @@ impl ReliableEndpoint {
 /// A circular buffer for tracking sequence numbers.
 #[derive(Debug)]
 pub struct SequenceBuffer<T> {
-    entries: Vec<Option<T>>,
+    entries: Vec<Option<(u16, T)>>,
     sequence: u16,
     size: usize,
 }
@@ -351,17 +310,20 @@ impl<T> SequenceBuffer<T> {
         }
 
         let index = sequence as usize % self.size;
-        self.entries[index] = Some(data);
+        self.entries[index] = Some((sequence, data));
     }
 
     pub fn exists(&self, sequence: u16) -> bool {
         let index = sequence as usize % self.size;
-        self.entries[index].is_some()
+        matches!(&self.entries[index], Some((stored_seq, _)) if *stored_seq == sequence)
     }
 
     pub fn get(&self, sequence: u16) -> Option<&T> {
         let index = sequence as usize % self.size;
-        self.entries[index].as_ref()
+        match &self.entries[index] {
+            Some((stored_seq, data)) if *stored_seq == sequence => Some(data),
+            _ => None,
+        }
     }
 }
 
@@ -429,45 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn test_progressive_backoff() {
-        let mut endpoint = ReliableEndpoint::new(256);
-        let now = Instant::now();
-
-        endpoint.on_packet_sent(0, now, vec![1, 2, 3]);
-
-        // First timeout at RTO
-        let t1 = now + endpoint.rto + Duration::from_millis(1);
-        let resent = endpoint.update(t1);
-        assert_eq!(resent.len(), 1);
-
-        // Second timeout should take ~2x RTO from t1
-        let t2 = t1 + endpoint.rto;
-        let resent2 = endpoint.update(t2);
-        assert_eq!(resent2.len(), 0, "Should not resend yet (backoff)");
-
-        let t3 = t1 + endpoint.rto * 2 + Duration::from_millis(1);
-        let resent3 = endpoint.update(t3);
-        assert_eq!(resent3.len(), 1, "Should resend after 2x RTO");
-    }
-
-    #[test]
-    fn test_fast_retransmit() {
-        let mut endpoint = ReliableEndpoint::new(256);
-        let now = Instant::now();
-
-        endpoint.on_packet_sent(5, now, vec![5, 5, 5]);
-
-        // 1st dup ack - no retransmit
-        assert!(endpoint.on_duplicate_ack(5).is_none());
-        // 2nd dup ack - no retransmit
-        assert!(endpoint.on_duplicate_ack(5).is_none());
-        // 3rd dup ack - trigger fast retransmit
-        let result = endpoint.on_duplicate_ack(5);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().0, 5);
-    }
-
-    #[test]
     fn test_sequence_buffer_operations() {
         let mut buffer: SequenceBuffer<u32> = SequenceBuffer::new(16);
 
@@ -507,36 +430,66 @@ mod tests {
         let now = Instant::now();
 
         // Send 4 packets (at capacity)
-        for i in 0..4 {
-            endpoint.on_packet_sent(i, now, vec![i as u8]);
+        for i in 0..4u16 {
+            endpoint.on_packet_sent(i, now, 0, i, 100);
         }
         assert_eq!(endpoint.packets_in_flight(), 4);
 
         // Send a 5th — should evict one
-        endpoint.on_packet_sent(4, now, vec![4]);
+        endpoint.on_packet_sent(4, now, 0, 4, 100);
         assert_eq!(endpoint.packets_in_flight(), 4);
         assert_eq!(endpoint.packets_evicted(), 1);
     }
 
     #[test]
-    fn test_in_flight_evicts_highest_retry() {
-        let mut endpoint = ReliableEndpoint::new(256).with_max_in_flight(3);
+    fn test_sequence_buffer_collision() {
+        // Two sequences that map to the same index should not collide
+        let mut buffer: SequenceBuffer<u32> = SequenceBuffer::new(16);
+
+        buffer.insert(0, 100);
+        assert!(buffer.exists(0));
+
+        // Sequence 16 maps to the same slot as 0 (16 % 16 == 0)
+        buffer.insert(16, 200);
+        assert!(buffer.exists(16));
+        // Old entry at sequence 0 should no longer exist
+        assert!(!buffer.exists(0));
+        assert_eq!(*buffer.get(16).unwrap(), 200);
+        assert!(buffer.get(0).is_none());
+    }
+
+    #[test]
+    fn test_ack_bits_no_false_ack() {
+        let mut endpoint = ReliableEndpoint::new(256);
+
+        // Receive packet 0, then packet 2 (skip 1)
+        endpoint.on_packet_received(0, Instant::now());
+        endpoint.on_packet_received(2, Instant::now());
+
+        let (ack, ack_bits) = endpoint.get_ack_info();
+        assert_eq!(ack, 2, "remote_sequence should be 2");
+        // Bit 0 should be set (sequence 2-1=1 distance), but seq 1 was NOT received
+        // Bit 1 should be set (sequence 2-2=0 distance) for seq 0
+        // ack_bits bit i represents ack - (i+1), so:
+        //   bit 0 = ack-1 = seq 1 (NOT received, should be 0)
+        //   bit 1 = ack-2 = seq 0 (received, should be 1)
+        assert_eq!(ack_bits & 1, 0, "seq 1 was not received, bit 0 should be 0");
+        assert_ne!(ack_bits & 2, 0, "seq 0 was received, bit 1 should be set");
+    }
+
+    #[test]
+    fn test_process_acks_returns_channel_info() {
+        let mut endpoint = ReliableEndpoint::new(256);
         let now = Instant::now();
 
-        endpoint.on_packet_sent(0, now, vec![0]);
-        endpoint.on_packet_sent(1, now, vec![1]);
-        endpoint.on_packet_sent(2, now, vec![2]);
+        endpoint.on_packet_sent(10, now, 2, 5, 100);
+        endpoint.on_packet_sent(11, now, 3, 7, 200);
 
-        // Simulate retries on seq 1 by updating past RTO multiple times
-        let t1 = now + endpoint.rto() + Duration::from_millis(1);
-        let _ = endpoint.update(t1);
-        // seq 0,1,2 all got retried once. Now retry again past 2x RTO
-        let t2 = t1 + endpoint.rto() * 2 + Duration::from_millis(1);
-        let _ = endpoint.update(t2);
-
-        // Now send a 4th packet — should evict the one with highest retry
-        endpoint.on_packet_sent(3, now + Duration::from_secs(1), vec![3]);
-        assert_eq!(endpoint.packets_in_flight(), 3);
-        assert_eq!(endpoint.packets_evicted(), 1);
+        // ACK packet 10 directly, packet 11 via ack_bits
+        let acked = endpoint.process_acks(11, 1); // bit 0 = seq 10
+        assert_eq!(acked.len(), 2);
+        // Should contain both (3, 7) for seq 11 and (2, 5) for seq 10
+        assert!(acked.contains(&(3, 7)));
+        assert!(acked.contains(&(2, 5)));
     }
 }

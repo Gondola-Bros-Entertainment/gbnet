@@ -76,19 +76,7 @@ impl Connection {
             }
 
             (ConnectionState::Connected, _) => {
-                self.reliability
-                    .on_packet_received(packet.header.sequence, Instant::now());
-
-                if crate::packet::sequence_greater_than(
-                    packet.header.sequence,
-                    self.remote_sequence,
-                ) {
-                    self.remote_sequence = packet.header.sequence;
-                }
-
-                self.process_acks_for_channels(packet.header.ack, packet.header.ack_bits);
-                self.reliability
-                    .process_acks(packet.header.ack, packet.header.ack_bits);
+                self.process_incoming_header(&packet.header);
 
                 match packet.packet_type {
                     PacketType::Payload {
@@ -143,20 +131,6 @@ impl Connection {
             _ => {}
         }
         Ok(())
-    }
-
-    fn process_acks_for_channels(&mut self, ack: u16, ack_bits: u32) {
-        for channel in &mut self.channels {
-            if channel.is_reliable() {
-                channel.acknowledge_message(ack);
-                for i in 0..crate::reliability::ACK_BITS_WINDOW {
-                    if (ack_bits & (1 << i)) != 0 {
-                        let acked_seq = ack.wrapping_sub(i + 1);
-                        channel.acknowledge_message(acked_seq);
-                    }
-                }
-            }
-        }
     }
 
     pub(crate) fn reset_connection(&mut self) {

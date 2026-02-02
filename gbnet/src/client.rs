@@ -32,6 +32,8 @@ pub struct NetClient {
     connected_notified: bool,
     state: ClientState,
     connect_time: Instant,
+    disconnect_time: Option<Instant>,
+    disconnect_retry_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,6 +41,7 @@ enum ClientState {
     Connecting,
     ChallengeResponse,
     Connected,
+    Disconnecting,
     Disconnected,
 }
 
@@ -61,6 +64,8 @@ impl NetClient {
             connected_notified: false,
             state: ClientState::Connecting,
             connect_time: Instant::now(),
+            disconnect_time: None,
+            disconnect_retry_count: 0,
         };
 
         client.send_raw(PacketType::ConnectionRequest);
@@ -81,6 +86,24 @@ impl NetClient {
                 self.state = ClientState::Disconnected;
                 events.push(ClientEvent::Disconnected(DisconnectReason::Timeout));
                 return events;
+            }
+        }
+
+        if self.state == ClientState::Disconnecting {
+            let config = self.connection.config().clone();
+            if let Some(disc_time) = self.disconnect_time {
+                if disc_time.elapsed() > config.disconnect_retry_timeout {
+                    if self.disconnect_retry_count >= config.disconnect_retries {
+                        self.state = ClientState::Disconnected;
+                        events.push(ClientEvent::Disconnected(DisconnectReason::Requested));
+                        return events;
+                    }
+                    self.disconnect_retry_count += 1;
+                    self.disconnect_time = Some(Instant::now());
+                    self.send_raw(PacketType::Disconnect {
+                        reason: disconnect_reason::REQUESTED,
+                    });
+                }
             }
         }
 
@@ -168,21 +191,29 @@ impl NetClient {
         self.connected_notified = false;
         self.state = ClientState::Connecting;
         self.connect_time = Instant::now();
+        self.disconnect_time = None;
+        self.disconnect_retry_count = 0;
         self.send_raw(PacketType::ConnectionRequest);
     }
 
-    /// Disconnect from the server.
+    /// Disconnect from the server. Sends a disconnect packet and enters
+    /// `Disconnecting` state with retry logic until acknowledged or max retries.
     pub fn disconnect(&mut self) {
         self.send_raw(PacketType::Disconnect {
             reason: disconnect_reason::REQUESTED,
         });
-        self.state = ClientState::Disconnected;
+        self.state = ClientState::Disconnecting;
+        self.disconnect_time = Some(Instant::now());
+        self.disconnect_retry_count = 0;
     }
 
     /// Shut down the client, sending a disconnect to the server.
     pub fn shutdown(&mut self) {
-        if self.state == ClientState::Connected {
-            self.disconnect();
+        if self.state == ClientState::Connected || self.state == ClientState::Disconnecting {
+            self.send_raw(PacketType::Disconnect {
+                reason: disconnect_reason::REQUESTED,
+            });
+            self.state = ClientState::Disconnected;
         }
     }
 
@@ -191,6 +222,7 @@ impl NetClient {
             ClientState::Connecting => ConnectionState::Connecting,
             ClientState::ChallengeResponse => ConnectionState::ChallengeResponse,
             ClientState::Connected => ConnectionState::Connected,
+            ClientState::Disconnecting => ConnectionState::Disconnecting,
             ClientState::Disconnected => ConnectionState::Disconnected,
         }
     }
@@ -296,6 +328,10 @@ impl NetClient {
             (ClientState::Connected, PacketType::KeepAlive) => {
                 self.connection.touch_recv_time();
                 self.connection.process_incoming_header(&packet.header);
+            }
+            (ClientState::Disconnecting, PacketType::Disconnect { reason }) => {
+                self.state = ClientState::Disconnected;
+                events.push(ClientEvent::Disconnected(DisconnectReason::from(reason)));
             }
             _ => {}
         }

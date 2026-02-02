@@ -331,6 +331,19 @@ impl MtuDiscovery {
     pub fn is_complete(&self) -> bool {
         self.state == MtuState::Complete
     }
+
+    /// Check if the current probe has timed out without acknowledgement.
+    /// If so, treat the current probe size as too large.
+    pub fn check_probe_timeout(&mut self) {
+        if self.state == MtuState::Complete {
+            return;
+        }
+        if let Some(last) = self.last_probe_time {
+            if last.elapsed() >= self.probe_timeout {
+                self.on_probe_timeout();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

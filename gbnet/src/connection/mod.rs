@@ -247,11 +247,13 @@ impl Connection {
         self.state = state;
     }
 
-    pub(crate) fn create_header(&self) -> PacketHeader {
+    pub(crate) fn create_header(&mut self) -> PacketHeader {
         let (ack, ack_bits) = self.reliability.get_ack_info();
+        let seq = self.local_sequence;
+        self.local_sequence = self.local_sequence.wrapping_add(1);
         PacketHeader {
             protocol_id: self.config.protocol_id,
-            sequence: self.local_sequence,
+            sequence: seq,
             ack,
             ack_bits,
         }
@@ -345,19 +347,12 @@ impl Connection {
             self.remote_sequence = header.sequence;
         }
 
-        for channel in &mut self.channels {
-            if channel.is_reliable() {
-                channel.acknowledge_message(header.ack);
-                for i in 0..crate::reliability::ACK_BITS_WINDOW {
-                    if (header.ack_bits & (1 << i)) != 0 {
-                        let acked_seq = header.ack.wrapping_sub(i + 1);
-                        channel.acknowledge_message(acked_seq);
-                    }
-                }
+        let acked_pairs = self.reliability.process_acks(header.ack, header.ack_bits);
+        for (channel_id, channel_seq) in acked_pairs {
+            if (channel_id as usize) < self.channels.len() {
+                self.channels[channel_id as usize].acknowledge_message(channel_seq);
             }
         }
-
-        self.reliability.process_acks(header.ack, header.ack_bits);
     }
 
     /// Drain the send queue, returning packets that need to be sent over the wire.
@@ -369,7 +364,6 @@ impl Connection {
     pub fn record_bytes_sent(&mut self, bytes: usize) {
         self.bandwidth_up.record(bytes);
         self.last_packet_send_time = Instant::now();
-        self.local_sequence = self.local_sequence.wrapping_add(1);
         self.stats.packets_sent += 1;
         self.stats.bytes_sent += bytes as u64;
     }
