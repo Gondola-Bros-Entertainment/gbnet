@@ -11,11 +11,14 @@
 //! - **5 delivery modes**: Unreliable, UnreliableSequenced, ReliableUnordered,
 //!   ReliableOrdered, ReliableSequenced
 //! - **Bitpacked serialization** with `#[derive(NetworkSerialize)]` and `#[bits = N]`
-//! - **Adaptive reliability**: Jacobson/Karels RTT, exponential backoff, fast retransmit
+//! - **Adaptive reliability**: Jacobson/Karels RTT, channel-owned retransmission
+//!   with exponential backoff, bounded in-flight tracking
 //! - **Binary congestion control** with message batching
-//! - **Message fragmentation** and MTU discovery
-//! - **Optional AES-256-GCM encryption** via the `encryption` feature
-//! - **CRC32C** packet integrity checking
+//! - **Auto fragmentation** when payloads exceed the fragment threshold, with MTU
+//!   discovery and probe timeout detection
+//! - **Security**: CRC32C integrity, IP-based rate limiting, deserialization bounds
+//!   checking, optional AES-256-GCM encryption with per-connection nonce salt
+//! - **Reliable disconnect** with configurable retry and backoff
 //!
 //! ## Quick Start
 //!
